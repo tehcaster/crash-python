@@ -2,7 +2,8 @@
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
 
 import gdb
-from util import container_of, find_member_variant, get_symbol_value
+from crash.infra import CrashBaseClass, export
+from crash.util import container_of, find_member_variant, get_symbol_value
 from bitmap import for_each_set_bit
 import crash.types.zone
 
@@ -11,9 +12,8 @@ VMEMMAP_START   = 0xffffea0000000000
 DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
 
-pgdat_type = gdb.lookup_type('pg_data_t')
-
-class Node:
+class Node(CrashBaseClass):
+    __types__ = [ 'pg_data_t' ]
 
     nids_online = None
     nids_possible = None

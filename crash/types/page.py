@@ -2,17 +2,14 @@
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
 
 import gdb
-from util import container_of, find_member_variant
+from crash.infra import CrashBaseClass, export
+from crash.util import container_of, find_member_variant
 
 # TODO: un-hardcode this
 VMEMMAP_START   = 0xffffea0000000000
 DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
 NODES_SHIFT     = 10
-
-struct_page_type = gdb.lookup_type('struct page')
-
-vmemmap = gdb.Value(VMEMMAP_START).cast(struct_page_type.pointer())
 
 def get_flag(flagname):
     sym = gdb.lookup_symbol("PG_" + flagname, None)[0]
@@ -27,11 +24,19 @@ PG_slab = get_flag("slab")
 #TODO debuginfo won't tell us, depends on version?
 PAGE_MAPPING_ANON = 1
 
-class Page:
-    slab_cache_name = find_member_variant(struct_page_type,
-                                    ("slab_cache", "lru"))
-    slab_page_name = find_member_variant(struct_page_type,
-                                    ("slab_page", "lru"))
+class Page(CrashBaseClass):
+    __types__ = [ 'struct page' ]
+    __type_callbacks__ = [ ('struct page', 'check_page_type' ) ]
+
+    slab_cache_name = None
+    slab_page_name = None
+    vmemmap = None
+
+    @classmethod
+    def check_page_type(cls, gdbtype):
+        cls.slab_cache_name = find_member_variant(gdbtype, ('slab_cache', 'lru'))
+        cls.slab_page_name = find_member_variant(gdbtype, ('slab_page', 'lru'))
+        cls.vmemmap = gdb.Value(VMEMMAP_START).cast(gdbtype.pointer())
 
     @staticmethod
     def from_pfn(pfn):

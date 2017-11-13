@@ -3,7 +3,6 @@
 
 import gdb
 from crash.types.list import list_for_each_entry
-from crash.types.util import find_member_variant
 from crash.cache import CrashCache
 
 class CrashCacheSlab(CrashCache):

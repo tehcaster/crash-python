@@ -3,7 +3,7 @@
 
 import gdb
 import crash
-from crash.commands import CrashCommand
+from crash.commands import CrashCommand, CrashCommandParser
 from crash.types.slab import KmemCache, Slab
 from crash.types.zone import Zone
 from crash.types.vmstat import VmStat
@@ -28,7 +28,7 @@ DESCRIPTION
     """
 
     def __init__(self, name):
-        parser = argparse.ArgumentParser(prog=name)
+        parser = CrashCommandParser(prog=name)
 
         group = parser.add_mutually_exclusive_group()
         group.add_argument('-s', action='store_true', default=False)
@@ -38,7 +38,7 @@ DESCRIPTION
         parser.add_argument('arg', nargs=argparse.REMAINDER)
 
         parser.format_usage = lambda : "kmem [-s] [addr | slabname]\n"
-        CrashCommand.__init__(self, name, parser)
+        super(KmemCommand, self).__init__(name, parser)
 
     def execute(self, args):
         if args.z:

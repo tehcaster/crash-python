@@ -2,7 +2,7 @@
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
 
 import gdb
-from util import container_of, find_member_variant, get_symbol_value
+from crash.util import container_of, find_member_variant, get_symbol_value
 from bitmap import for_each_set_bit
 
 # this wraps no particular type, rather it's a placeholder for

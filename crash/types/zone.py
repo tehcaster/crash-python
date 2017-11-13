@@ -2,7 +2,8 @@
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
 
 import gdb
-from util import container_of, find_member_variant
+from crash.infra import CrashBaseClass, export
+from crash.util import container_of, find_member_variant
 import crash.types.node
 from crash.types.percpu import get_percpu_var
 from crash.types.vmstat import VmStat
@@ -13,12 +14,11 @@ VMEMMAP_START   = 0xffffea0000000000
 DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
 
-zone_type = gdb.lookup_type('struct zone')
-
 def getValue(sym):
     return gdb.lookup_symbol(sym, None)[0].value()
 
-class Zone:
+class Zone(CrashBaseClass):
+    __types__ = [ 'struct zone' ]
 
     @staticmethod
     def for_each():
