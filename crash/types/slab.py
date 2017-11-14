@@ -3,7 +3,7 @@
 
 import gdb
 import crash
-from crash.util import container_of, find_member_variant, safe_lookup_type, get_symbol_value
+from crash.util import container_of, find_member_variant, get_symbol_value
 from crash.util import safe_get_symbol_value
 from percpu import get_percpu_var
 from crash.infra import CrashBaseClass, export
@@ -12,10 +12,6 @@ from crash.types.page import Page
 from crash.types.node import Node
 from crash.types.cpu import for_each_online_cpu
 from crash.cache.slab import cache as caches_cache
-
-bufctl_type = safe_lookup_type("kmem_bufctl_t")
-if bufctl_type is None:
-    bufctl_type = safe_lookup_type("freelist_idx_t")
 
 AC_PERCPU = "percpu"
 AC_SHARED = "shared"
@@ -28,12 +24,17 @@ slab_free = 2
 BUFCTL_END = ~0 & 0xffffffff
 
 class Slab(CrashBaseClass):
-    __types__ = [ 'struct slab', 'struct page', 'kmem_cache' ]
-    __type_callbacks__ = [ ('struct page', 'check_page_type' ),
-                           ('struct slab', 'check_slab_type' ) ]
+    __types__ = [ 'struct slab', 'struct page', 'kmem_cache', 'kmem_bufctl_t',
+                  'freelist_idx_t' ]
+    __type_callbacks__ = [ ('struct page', 'check_page_type'),
+                           ('struct slab', 'check_slab_type'),
+                           ('kmem_bufctl_t', 'check_bufctl_type'),
+                           ('freelist_idx_t', 'check_bufctl_type') ]
+
     slab_list_head = None
     page_slab = None
     real_slab_type = None
+    bufctl_type = None
 
     @classmethod
     def check_page_type(cls, gdbtype):
@@ -48,19 +49,22 @@ class Slab(CrashBaseClass):
         cls.real_slab_type = gdbtype
         cls.slab_list_head = 'list'
 
+    @classmethod
+    def check_bufctl_type(cls, gdbtype):
+        cls.bufctl_type = gdbtype
 
-    @staticmethod
-    def from_addr(slab_addr, kmem_cache):
+    @classmethod
+    def from_addr(cls, slab_addr, kmem_cache):
         if not isinstance(kmem_cache, KmemCache):
             kmem_cache = KmemCache.from_addr(kmem_cache)
-        slab_struct = gdb.Value(slab_addr).cast(real_slab_type.pointer()).dereference()
+        slab_struct = gdb.Value(slab_addr).cast(cls.real_slab_type.pointer()).dereference()
         return Slab(slab_struct, kmem_cache)
 
-    @staticmethod
-    def from_page(page):
+    @classmethod
+    def from_page(cls, page):
         kmem_cache_addr = long(page.get_slab_cache())
         kmem_cache = KmemCache.from_addr(kmem_cache_addr)
-        if page_slab:
+        if cls.page_slab:
             return Slab(page.gdb_obj, kmem_cache)
         else:
             slab_addr = long(page.get_slab_page())
@@ -73,6 +77,12 @@ class Slab(CrashBaseClass):
             return None
 
         return Slab.from_page(page)
+
+    @classmethod
+    def from_list(cls, list_head, kmem_cache):
+        for gdb_slab in list_for_each_entry(list_head, cls.real_slab_type, cls.slab_list_head):
+            slab = Slab(gdb_slab, kmem_cache)
+            yield slab
 
     def __add_free_obj_by_idx(self, idx):
         objs_per_slab = self.kmem_cache.objs_per_slab
@@ -100,15 +110,15 @@ class Slab(CrashBaseClass):
         bufsize = self.kmem_cache.buffer_size
         objs_per_slab = self.kmem_cache.objs_per_slab
 
-        if page_slab:
+        if self.page_slab:
             page = self.gdb_obj
-            freelist = page["freelist"].cast(bufctl_type.pointer())
+            freelist = page["freelist"].cast(self.bufctl_type.pointer())
             for i in range(self.inuse, objs_per_slab):
                 obj_idx  = int(freelist[i])
                 self.__add_free_obj_by_idx(obj_idx)
 
         else:
-            bufctl = self.gdb_obj.address[1].cast(bufctl_type).address
+            bufctl = self.gdb_obj.address[1].cast(self.bufctl_type).address
             f = int(self.gdb_obj["free"])
             while f != BUFCTL_END:
                 if not self.__add_free_obj_by_idx(f):
@@ -187,7 +197,7 @@ class Slab(CrashBaseClass):
             if num_free > 0:
                 self.__free_error("slab_full")
 
-        if page_slab:
+        if self.page_slab:
             slab_nid = self.page.get_nid()
             if nid != slab_nid:
                 self.__error(": slab is on nid %d instead of %d" % 
@@ -200,6 +210,7 @@ class Slab(CrashBaseClass):
             if obj in self.free and obj in ac:
                 self.__error(": obj %x is marked as free but in array cache:" % obj)
                 print(ac[obj])
+            page = Page.from_addr(obj).compound_head()
             try:
                 page = Page.from_addr(obj).compound_head()
             except:
@@ -221,7 +232,7 @@ class Slab(CrashBaseClass):
                 self.__error(": obj %x is on page where pointer to kmem_cache points to %x instead of %x" %
                                             (obj, kmem_cache_addr, long(self.kmem_cache.gdb_obj.address)))
 
-            if page_slab:
+            if self.page_slab:
                 continue
 
             slab_addr = long(page.get_slab_page())
@@ -229,13 +240,13 @@ class Slab(CrashBaseClass):
                 self.__error(": obj %x is on page where pointer to slab wrongly points to %x" %
                                                                         (obj, slab_addr))
         return num_free
-            
+
     def __init__(self, gdb_obj, kmem_cache):
         self.gdb_obj = gdb_obj
         self.kmem_cache = kmem_cache
         self.free = None
 
-        if page_slab:
+        if self.page_slab:
             self.inuse = int(gdb_obj["active"])
             self.page = Page.from_obj(gdb_obj)
         else:
@@ -244,12 +255,15 @@ class Slab(CrashBaseClass):
 
 class KmemCache(CrashBaseClass):
     __types__ = [ 'struct kmem_cache', 'struct alien_cache' ]
-    __type_callbacks__ = [ ('struct kmem_cache', 'check_kmem_cache_type') ]
+    __type_callbacks__ = [ ('struct kmem_cache', 'check_kmem_cache_type'),
+                           ('struct alien_cache', 'setup_alien_cache_type') ]
 
     buffer_size_name = None
     nodelists_name = None
     percpu_name = None
     percpu_cache = None
+    head_name = None
+    alien_cache_type_exists = False
 
     @classmethod
     def check_kmem_cache_type(cls, gdbtype):
@@ -257,6 +271,11 @@ class KmemCache(CrashBaseClass):
         cls.nodelists_name = find_member_variant(gdbtype, ('nodelists', 'node'))
         cls.percpu_name = find_member_variant(gdbtype, ('cpu_cache', 'array'))
         cls.percpu_cache = bool(cls.percpu_name == 'cpu_cache')
+        cls.head_name = find_member_variant(gdbtype, ('next', 'list'))
+
+    @classmethod
+    def setup_alien_cache_type(cls, gdbtype):
+        cls.alien_cache_type_exists = True
 
     def __get_nodelist(self, node):
         return self.gdb_obj[KmemCache.nodelists_name][node]
@@ -268,8 +287,8 @@ class KmemCache(CrashBaseClass):
                 continue
             yield (nid, node.dereference())
 
-    @staticmethod
-    def __init_kmem_caches():
+    @classmethod
+    def __init_kmem_caches(cls):
         if caches_cache.populated:
             return
 
@@ -278,10 +297,8 @@ class KmemCache(CrashBaseClass):
         if not list_caches:
             list_caches = safe_get_symbol_value("cache_chain")
 
-        head_name = find_member_variant(kmem_cache_type, ("next", "list"))
-
-        for cache in list_for_each_entry(list_caches, kmem_cache_type,
-                                                                head_name):
+        for cache in list_for_each_entry(list_caches, cls.kmem_cache_type,
+                                                                cls.head_name):
             name = cache["name"].string()
             kmem_cache = KmemCache(name, cache)
  
@@ -347,7 +364,7 @@ class KmemCache(CrashBaseClass):
             if array.address == 0:
                 continue
 
-            if KmemCache.alien_cache_type is not None:
+            if self.alien_cache_type_exists:
                 array = array["ac"]
 
             # A node cannot have alien cache on the same node, but some
@@ -388,8 +405,7 @@ class KmemCache(CrashBaseClass):
         return self.array_caches
 
     def __get_allocated_objects(self, slab_list):
-        for gdb_slab in list_for_each_entry(slab_list, real_slab_type, slab_list_head):
-            slab = Slab(gdb_slab, self)
+        for slab in Slab.from_list(slab_list, self):
             for obj in slab.get_allocated_objects():
                 yield obj
 
@@ -402,8 +418,7 @@ class KmemCache(CrashBaseClass):
 
     def __check_slabs(self, slab_list, slabtype, nid):
         free = 0
-        for gdb_slab in list_for_each_entry(slab_list, real_slab_type, slab_list_head):
-            slab = Slab(gdb_slab, self)
+        for slab in Slab.from_list(slab_list, self):
             free += slab.check(slabtype, nid)
         #TODO: check if array cache contains bogus pointers or free objects
         return free

@@ -3,25 +3,40 @@
 
 import gdb
 
-ulong_type = gdb.lookup_type("unsigned long")
-bits_per_ulong = ulong_type.sizeof * 8
+from crash.infra import CrashBaseClass, export
 
-def for_each_set_bit(bitmap):
-    size = bitmap.type.sizeof * 8
-    idx = 0
-    bit = 0
-    while size > 0:
-        ulong = bitmap[idx]
+class TypesBitmapClass(CrashBaseClass):
+    __types__ = [ 'unsigned long' ]
+    __type_callbacks__ = [ ('unsigned long', 'setup_ulong') ]
 
-        if ulong != 0:
-            for off in range(min(size, bits_per_ulong)):
-                if ulong & 1 != 0:
-                    yield bit
-                bit += 1
-                ulong >>= 1
-        else:
-            bit += bits_per_ulong
+    bits_per_ulong = None
 
-        size -= bits_per_ulong
-        idx += 1
+    @classmethod
+    def setup_ulong(cls, gdbtype):
+        cls.bits_per_ulong = gdbtype.sizeof * 8
+
+    @export
+    @classmethod
+    def for_each_set_bit(cls, bitmap):
+
+        # FIXME: callback not workie?
+        cls.bits_per_ulong = cls.unsigned_long_type.sizeof * 8
+
+        size = bitmap.type.sizeof * 8
+        idx = 0
+        bit = 0
+        while size > 0:
+            ulong = bitmap[idx]
+
+            if ulong != 0:
+                for off in range(min(size, cls.bits_per_ulong)):
+                    if ulong & 1 != 0:
+                        yield bit
+                    bit += 1
+                    ulong >>= 1
+            else:
+                bit += cls.bits_per_ulong
+
+            size -= cls.bits_per_ulong
+            idx += 1
     

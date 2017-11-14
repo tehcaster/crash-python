@@ -2,6 +2,7 @@
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
 
 import gdb
+import types
 from crash.infra import CrashBaseClass, export
 from crash.util import container_of, find_member_variant
 
@@ -11,36 +12,65 @@ DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
 NODES_SHIFT     = 10
 
-def get_flag(flagname):
-    sym = gdb.lookup_symbol("PG_" + flagname, None)[0]
-    if sym is not None:
-        return 1L << long(sym.value())
-    else:
-        return None
-
-PG_tail = get_flag("tail")
-PG_slab = get_flag("slab")
-
 #TODO debuginfo won't tell us, depends on version?
 PAGE_MAPPING_ANON = 1
 
 class Page(CrashBaseClass):
-    __types__ = [ 'struct page' ]
-    __type_callbacks__ = [ ('struct page', 'check_page_type' ) ]
+    __types__ = [ 'struct page', 'enum pageflags' ]
+    __type_callbacks__ = [ ('struct page', 'setup_page_type' ),
+                           ('enum pageflags', 'setup_pageflags' ) ]
 
     slab_cache_name = None
     slab_page_name = None
+    compound_head_name = None
     vmemmap = None
+    pageflags = dict()
+
+    PG_tail = None
+    PG_slab = None
+
+    setup_page_type_done = False
+    setup_pageflags_done = False
+    setup_pageflags_finish_done = False
 
     @classmethod
-    def check_page_type(cls, gdbtype):
+    def setup_page_type(cls, gdbtype):
         cls.slab_cache_name = find_member_variant(gdbtype, ('slab_cache', 'lru'))
         cls.slab_page_name = find_member_variant(gdbtype, ('slab_page', 'lru'))
+        cls.compound_head_name = find_member_variant(gdbtype, ('compound_head', 'first_page' ))
         cls.vmemmap = gdb.Value(VMEMMAP_START).cast(gdbtype.pointer())
 
-    @staticmethod
-    def from_pfn(pfn):
-        return Page(vmemmap[pfn], pfn)
+        cls.setup_page_type_done = True
+        if cls.setup_pageflags_done and not cls.setup_pageflags_finish_done:
+            cls.setup_pageflags_finish()
+
+    @classmethod
+    def setup_pageflags(cls, gdbtype):
+        for field in gdbtype.fields():
+            cls.pageflags[field.name] = field.enumval
+
+        cls.setup_pageflags_done = True
+        if cls.setup_page_type_done and not cls.setup_pageflags_finish_done:
+            cls.setup_pageflags_finish()
+
+        cls.PG_slab = 1L << cls.pageflags['PG_slab']
+
+    @classmethod
+    def setup_pageflags_finish(cls):
+        cls.setup_pageflags_finish_done = True
+        if 'PG_tail' in cls.pageflags.keys():
+            cls.PG_tail = 1L << cls.pageflags['PG_tail']
+            cls.is_tail = cls.__is_tail_flag
+
+        if cls.compound_head_name == 'first_page':
+            cls.__compound_head = cls.__compound_head_first_page
+            if cls.PG_tail is None:
+                cls.PG_tail = 1L << cls.pageflags['PG_compound'] | 1L << cls.pageflags['PG_reclaim']
+                cls.is_tail = cls.__is_tail_flagcombo
+
+    @classmethod
+    def from_pfn(cls, pfn):
+        return Page(cls.vmemmap[pfn], pfn)
 
     @staticmethod
     def from_addr(addr):
@@ -68,14 +98,17 @@ class Page(CrashBaseClass):
                 # TODO: distinguish pfn_valid() and report failures for those?
                 pass
 
+    def __is_tail_flagcombo(self):
+        return bool((self.flags & self.PG_tail) == self.PG_tail)
+
+    def __is_tail_flag(self):
+        return bool(self.flags & self.PG_tail)
+
     def is_tail(self):
-        if PG_tail is not None:
-            return bool(self.flags & PG_tail)
-        else:
-            return bool(self.gdb_obj["compound_head"] & 1)
+        return bool(self.gdb_obj['compound_head'] & 1)
 
     def is_slab(self):
-        return bool(self.flags & PG_slab)
+        return bool(self.flags & self.PG_slab)
 
     def is_anon(self):
         mapping = long(self.gdb_obj["mapping"])
@@ -95,15 +128,17 @@ class Page(CrashBaseClass):
         # TODO unhardcode
         return self.flags >> (64 - NODES_SHIFT)
 
+    def __compound_head_first_page(self):
+        return long(self.gdb_obj['first_page'])
+
+    def __compound_head(self):
+        return long(self.gdb_obj['compound_head']) - 1
+
     def compound_head(self):
         if not self.is_tail():
             return self
 
-        if PG_tail is not None:
-            first_page = long(self.gdb_obj["first_page"])
-        else:
-            first_page = long(self.gdb_obj["compound_head"]) - 1
-        return Page.from_page_addr(first_page)
+        return Page.from_page_addr(self.__compound_head())
         
     def __init__(self, obj, pfn):
         self.gdb_obj = obj
