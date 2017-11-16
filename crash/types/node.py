@@ -13,7 +13,7 @@ DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
 
 class Node(CrashBaseClass):
-    __types__ = [ 'pg_data_t' ]
+    __types__ = [ 'pg_data_t', 'struct zone' ]
 
     nids_online = None
     nids_possible = None
@@ -56,9 +56,17 @@ class Node(CrashBaseClass):
 
     def for_each_zone(self):
         node_zones = self.gdb_obj["node_zones"]
+
+        ptr = long(node_zones[0].address)
+
         (first, last) = node_zones.type.range()
         for zid in range(first, last + 1):
-            yield crash.types.zone.Zone(node_zones[zid], zid)
+            # FIXME: gdb seems to lose the alignment padding with plain
+            # node_zones[zid], so we have to simulate it using zone_type.sizeof
+            # which appears to be correct
+            zone = gdb.Value(ptr).cast(self.zone_type.pointer()).dereference()
+            yield crash.types.zone.Zone(zone, zid)
+            ptr += self.zone_type.sizeof
 
     def __init__(self, obj):
         self.gdb_obj = obj
