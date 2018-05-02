@@ -3,6 +3,8 @@
 
 import gdb
 import crash
+import sys
+import traceback
 from crash.util import container_of, find_member_variant, get_symbol_value
 from crash.util import safe_get_symbol_value
 from percpu import get_percpu_var
@@ -12,6 +14,7 @@ from crash.types.page import Page
 from crash.types.node import Node
 from crash.types.cpu import for_each_online_cpu
 from crash.cache.slab import cache as caches_cache
+from crash.types.node import numa_node_id
 
 AC_PERCPU = "percpu"
 AC_SHARED = "shared"
@@ -20,6 +23,8 @@ AC_ALIEN  = "alien"
 slab_partial = 0
 slab_full = 1
 slab_free = 2
+
+slab_list_name = {0: "partial", 1: "full", 2: "free"}
 
 BUFCTL_END = ~0 & 0xffffffff
 
@@ -79,9 +84,16 @@ class Slab(CrashBaseClass):
         return Slab.from_page(page)
 
     @classmethod
-    def from_list(cls, list_head, kmem_cache):
-        for gdb_slab in list_for_each_entry(list_head, cls.real_slab_type, cls.slab_list_head):
-            slab = Slab(gdb_slab, kmem_cache)
+    def from_list(cls, list_head, kmem_cache, reverse=False):
+        for gdb_slab in list_for_each_entry(list_head, cls.real_slab_type,
+                        cls.slab_list_head, reverse=reverse):
+            try:
+                slab = Slab(gdb_slab, kmem_cache)
+            except:
+                print("failed to initialize slab object {:#x}: {}".format(
+                            gdb_slab.address, sys.exc_info()[0]))
+                #traceback.print_exc()
+                slab = Slab(gdb_slab, kmem_cache, error = True)
             yield slab
 
     def __add_free_obj_by_idx(self, idx):
@@ -157,13 +169,19 @@ class Slab(CrashBaseClass):
 
         return (True, obj_addr, None)
     
-    def __error(self, msg):
-        print ("cache %s slab %x%s" % (self.kmem_cache.name,
-                    long(self.gdb_obj.address), msg))
+    def __error(self, msg, misplaced = False):
+        msg = "cache %s slab %x%s" % (self.kmem_cache.name,
+                    long(self.gdb_obj.address), msg)
+        self.error = True
+        if misplaced:
+            self.misplaced_error = msg
+        else:
+            print(msg)
  
     def __free_error(self, list_name):
+        self.misplaced_list = list_name
         self.__error(": is on list %s, but has %d of %d objects allocated" %
-                (list_name, len(self.free), self.kmem_cache.objs_per_slab))
+                (list_name, self.inuse, self.kmem_cache.objs_per_slab), misplaced = True)
 
     def get_objects(self):
         bufsize = self.kmem_cache.buffer_size
@@ -182,6 +200,30 @@ class Slab(CrashBaseClass):
         self.__populate_free()
         num_free = len(self.free)
         max_free = self.kmem_cache.objs_per_slab
+
+        if self.kmem_cache.off_slab and not Slab.page_slab:
+            struct_slab_slab = Slab.from_obj(long(self.gdb_obj.address))
+            if not struct_slab_slab:
+                self.__error(": OFF_SLAB struct slab is not a slab object itself")
+            else:
+                struct_slab_cache = struct_slab_slab.kmem_cache.name
+                if not self.kmem_cache.off_slab_cache:
+                    if struct_slab_cache != "size-64" and struct_slab_cache != "size-128":
+                        self.__error(": OFF_SLAB struct slab is in a wrong cache %s" %
+                                        struct_slab_cache)
+                    else:
+                        self.kmem_cache.off_slab_cache = struct_slab_cache
+                elif struct_slab_cache != self.kmem_cache.off_slab_cache:
+                    self.__error(": OFF_SLAB struct slab is in a wrong cache %s" %
+                                    struct_slab_cache)
+                
+                struct_slab_obj = struct_slab_slab.contains_obj(self.gdb_obj.address)
+                if not struct_slab_obj[0]:
+                    self.__error(": OFF_SLAB struct slab is not allocated")
+                    print(struct_slab_obj)
+                elif struct_slab_obj[1] != long(self.gdb_obj.address):
+                    self.__error(": OFF_SLAB struct slab at wrong offset{}".format(
+                                    long(self.gdb_obj.address) - struct_slab_obj[1]))
 
         if self.inuse + num_free != max_free:
             self.__error(": inuse=%d free=%d adds up to %d (should be %d)" %
@@ -210,7 +252,6 @@ class Slab(CrashBaseClass):
             if obj in self.free and obj in ac:
                 self.__error(": obj %x is marked as free but in array cache:" % obj)
                 print(ac[obj])
-            page = Page.from_addr(obj).compound_head()
             try:
                 page = Page.from_addr(obj).compound_head()
             except:
@@ -241,10 +282,16 @@ class Slab(CrashBaseClass):
                                                                         (obj, slab_addr))
         return num_free
 
-    def __init__(self, gdb_obj, kmem_cache):
+    def __init__(self, gdb_obj, kmem_cache, error=False):
+        self.error = error
         self.gdb_obj = gdb_obj
         self.kmem_cache = kmem_cache
         self.free = None
+        self.misplaced_list = None
+        self.misplaced_error = None
+
+        if error:
+            return
 
         if self.page_slab:
             self.inuse = int(gdb_obj["active"])
@@ -324,6 +371,13 @@ class KmemCache(CrashBaseClass):
         KmemCache.__init_kmem_caches()
         return caches_cache.kmem_caches.values()
 
+    @staticmethod
+    def all_find_obj(addr):
+        slab = Slab.from_obj(addr)
+        if not slab:
+            return None
+        return slab.contains_obj(addr)
+
     def __init__(self, name, gdb_obj):
         self.name = name
         self.gdb_obj = gdb_obj
@@ -331,6 +385,12 @@ class KmemCache(CrashBaseClass):
         
         self.objs_per_slab = int(gdb_obj["num"])
         self.buffer_size = int(gdb_obj[KmemCache.buffer_size_name])
+
+        if long(gdb_obj["flags"]) & 0x80000000:
+            self.off_slab = True
+            self.off_slab_cache = None
+        else:
+            self.off_slab = False
 
     def __fill_array_cache(self, acache, ac_type, nid_src, nid_tgt):
         avail = int(acache["avail"])
@@ -343,12 +403,24 @@ class KmemCache(CrashBaseClass):
         cache_dict = {"ac_type" : ac_type, "nid_src" : nid_src,
                         "nid_tgt" : nid_tgt}
 
+#        print(cache_dict)
+        if ac_type == AC_PERCPU:
+            nid_tgt = numa_node_id(nid_tgt)
+
         for i in range(avail):
             ptr = long(acache["entry"][i])
+#            print(hex(ptr))
             if ptr in self.array_caches:
                 print ("WARNING: array cache duplicity detected!")
             else:
                 self.array_caches[ptr] = cache_dict
+            
+            page = Page.from_addr(ptr)
+            obj_nid = page.get_nid()
+
+            if obj_nid != nid_tgt:
+                print ("Object {:#x} in cache {} is on wrong nid {} instead of {}".format(
+                            ptr, cache_dict, obj_nid, nid_tgt))
 
     def __fill_alien_caches(self, node, nid_src):
         alien_cache = node["alien"]
@@ -416,12 +488,107 @@ class KmemCache(CrashBaseClass):
             for obj in self.__get_allocated_objects(node["slabs_full"]):
                 yield obj
 
-    def __check_slabs(self, slab_list, slabtype, nid):
+    def __check_slab(self, slab, slabtype, nid, errors):
+        addr = long(slab.gdb_obj.address)
         free = 0
-        for slab in Slab.from_list(slab_list, self):
-            free += slab.check(slabtype, nid)
-        #TODO: check if array cache contains bogus pointers or free objects
+
+        if slab.error == False:
+            free = slab.check(slabtype, nid)
+
+        if slab.misplaced_error is None and errors['num_misplaced'] > 0:
+            if errors['num_misplaced'] > 0:
+                print("{} slab objects were misplaced, printing the last:".format(errors['num_misplaced']))
+                print(errors['last_misplaced'])
+                errors['num_misplaced'] = 0
+                errors['last_misplaced'] = None
+
+        if slab.error == False:
+            errors['num_ok'] += 1
+            errors['last_ok'] = addr
+            if not errors['first_ok']:
+                errors['first_ok'] = addr
+        else:
+            if errors['num_ok'] > 0:
+                print("{} slab objects were ok between {:#x} and {:#x}".
+                        format(errors['num_ok'], errors['first_ok'], errors['last_ok']))
+                errors['num_ok'] = 0
+                errors['first_ok'] = None
+                errors['last_ok'] = None
+
+            if slab.misplaced_error is not None:
+                if errors['num_misplaced'] == 0:
+                    print(slab.misplaced_error)
+                errors['num_misplaced'] += 1
+                errors['last_misplaced'] = slab.misplaced_error
+
         return free
+
+    def ___check_slabs(self, slab_list, slabtype, nid, reverse=False):
+        slabs = 0
+        free = 0
+        check_ok = True
+        
+        errors = {'first_ok': None, 'last_ok': None, 'num_ok': 0,
+                    'first_misplaced': None, 'last_misplaced': None, 'num_misplaced': 0}
+        try:
+            for slab in Slab.from_list(slab_list, self, reverse=reverse):
+                free += self.__check_slab(slab, slabtype, nid, errors)
+                slabs += 1 
+        except Exception as e:
+            print("Unrecoverable error when traversing {} slab list: {}".format(
+                                                slab_list_name[slabtype], e))
+            check_ok = False
+        
+        if errors['num_ok'] > 0:
+            print("{} slab objects were ok between {:#x} and {:#x}".
+                    format(errors['num_ok'], errors['first_ok'], errors['last_ok']))
+
+        if errors['num_misplaced'] > 0:
+                print("{} slab objects were misplaced, printing the last:".format(errors['num_misplaced']))
+                print(errors['last_misplaced'])
+
+        return (check_ok, slabs, free)
+
+    def __check_slabs(self, slab_list, slabtype, nid):
+        
+        print("checking {} slab list {:#x}".format(slab_list_name[slabtype],
+                                                long(slab_list.address)))
+
+        errors = {'first_ok': None, 'last_ok': None, 'num_ok': 0,
+                    'first_misplaced': None, 'last_misplaced': None, 'num_misplaced': 0}
+
+        (check_ok, slabs, free) = self.___check_slabs(slab_list, slabtype, nid)
+
+        if not check_ok:
+            print("Retrying the slab list in reverse order")
+            (check_ok, slabs_rev, free_rev) = self.___check_slabs(slab_list,
+                                                slabtype, nid, reverse=True)
+            slabs += slabs_rev
+            free += free_rev
+    
+        #print("checked {} slabs in {} slab list".format(
+#                    slabs, slab_list_name[slabtype]))
+
+        return free
+
+    def check_array_caches(self):
+        acs = self.get_array_caches()
+        for ac_ptr in acs.keys():
+            ac_obj_slab = Slab.from_obj(ac_ptr)
+            if not ac_obj_slab:
+                print("cached pointer {:#x} in {} not found in slab".format(
+                        ac_ptr, acs[ac_ptr]))
+            elif ac_obj_slab.kmem_cache.name != self.name:
+                print("cached pointer {:#x} in {} belongs to wrong kmem cache {}".format(
+                    ac_ptr, acs[ac_ptr], ac_obj_slab.kmem_cache.name))
+            else:
+                ac_obj_obj = ac_obj_slab.contains_obj(ac_ptr)
+                if ac_obj_obj[0] == False and ac_obj_obj[2] is None:
+                    print("cached pointer {:#x} in {} is not allocated: {}".format(
+                        ac_ptr, acs[ac_ptr], ac_obj_obj))
+                elif ac_obj_obj[1] != ac_ptr:
+                    print("cached pointer {:#x} in {} has wrong offset: {}".format(
+                        ac_ptr, acs[ac_ptr], ac_obj_obj))
 
     def check_all(self):
         for (nid, node) in self.__get_nodelists():
@@ -432,4 +599,5 @@ class KmemCache(CrashBaseClass):
             if free_declared != free_counted:
                 print ("free objects mismatch on node %d: declared=%d counted=%d" %
                                                 (nid, free_declared, free_counted))
+        self.check_array_caches()
 
