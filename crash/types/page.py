@@ -78,13 +78,13 @@ class Page(CrashBaseClass):
 
     @staticmethod
     def from_page_addr(addr):
-        page_ptr = gdb.Value(addr).cast(struct_page_type.pointer())
-        pfn = (addr - VMEMMAP_START) / struct_page_type.sizeof
+        page_ptr = gdb.Value(addr).cast(Page.page_type.pointer())
+        pfn = (addr - VMEMMAP_START) / Page.page_type.sizeof
         return Page(page_ptr.dereference(), pfn)
 
     @staticmethod
     def from_obj(gdb_obj):
-        pfn = (long(gdb_obj.address) - VMEMMAP_START) / struct_page_type.sizeof
+        pfn = (long(gdb_obj.address) - VMEMMAP_START) / Page.page_type.sizeof
         return Page(gdb_obj, pfn)
 
     @staticmethod
