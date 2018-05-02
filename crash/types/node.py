@@ -4,6 +4,7 @@
 import gdb
 from crash.infra import CrashBaseClass, export
 from crash.util import container_of, find_member_variant, get_symbol_value
+from crash.types.percpu import get_percpu_var
 from bitmap import for_each_set_bit
 import crash.types.zone
 
@@ -11,6 +12,13 @@ import crash.types.zone
 VMEMMAP_START   = 0xffffea0000000000
 DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
+
+class TypesNodeUtilsClass(CrashBaseClass):
+    __symbols__ = [ 'numa_node' ]
+
+    @export
+    def numa_node_id(self, cpu):
+        return long(get_percpu_var(self.numa_node, cpu))
 
 class Node(CrashBaseClass):
     __types__ = [ 'pg_data_t', 'struct zone' ]
@@ -70,3 +78,4 @@ class Node(CrashBaseClass):
 
     def __init__(self, obj):
         self.gdb_obj = obj
+
