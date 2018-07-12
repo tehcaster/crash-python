@@ -11,6 +11,7 @@ VMEMMAP_START   = 0xffffea0000000000
 DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
 NODES_SHIFT     = 10
+ZONES_WIDTH     = 3
 
 #TODO debuginfo won't tell us, depends on version?
 PAGE_MAPPING_ANON = 1
@@ -127,6 +128,11 @@ class Page(CrashBaseClass):
     def get_nid(self):
         # TODO unhardcode
         return self.flags >> (64 - NODES_SHIFT)
+
+    def get_zid(self):
+        shift = 64 - NODES_SHIFT - ZONES_WIDTH
+        zid = self.flags >> shift & ((1 << ZONES_WIDTH) - 1)
+        return zid
 
     def __compound_head_first_page(self):
         return long(self.gdb_obj['first_page'])
