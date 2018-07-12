@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
 
+from math import log, ceil
 import gdb
 import types
 from crash.infra import CrashBaseClass, export
@@ -11,15 +12,15 @@ VMEMMAP_START   = 0xffffea0000000000
 DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
 NODES_SHIFT     = 10
-ZONES_WIDTH     = 3
 
 #TODO debuginfo won't tell us, depends on version?
 PAGE_MAPPING_ANON = 1
 
 class Page(CrashBaseClass):
-    __types__ = [ 'struct page', 'enum pageflags' ]
+    __types__ = [ 'struct page', 'enum pageflags', 'enum zone_type' ]
     __type_callbacks__ = [ ('struct page', 'setup_page_type' ),
-                           ('enum pageflags', 'setup_pageflags' ) ]
+                           ('enum pageflags', 'setup_pageflags' ),
+                           ('enum zone_type', 'setup_zone_type' ) ]
 
     slab_cache_name = None
     slab_page_name = None
@@ -33,6 +34,8 @@ class Page(CrashBaseClass):
     setup_page_type_done = False
     setup_pageflags_done = False
     setup_pageflags_finish_done = False
+
+    ZONES_WIDTH = None
 
     @classmethod
     def setup_page_type(cls, gdbtype):
@@ -55,6 +58,11 @@ class Page(CrashBaseClass):
             cls.setup_pageflags_finish()
 
         cls.PG_slab = 1L << cls.pageflags['PG_slab']
+
+    @classmethod
+    def setup_zone_type(cls, gdbtype):
+        max_nr_zones = gdbtype['__MAX_NR_ZONES'].enumval
+        cls.ZONES_WIDTH = int(ceil(log(max_nr_zones)))
 
     @classmethod
     def setup_pageflags_finish(cls):
@@ -130,8 +138,8 @@ class Page(CrashBaseClass):
         return self.flags >> (64 - NODES_SHIFT)
 
     def get_zid(self):
-        shift = 64 - NODES_SHIFT - ZONES_WIDTH
-        zid = self.flags >> shift & ((1 << ZONES_WIDTH) - 1)
+        shift = 64 - NODES_SHIFT - self.ZONES_WIDTH
+        zid = self.flags >> shift & ((1 << self.ZONES_WIDTH) - 1)
         return zid
 
     def __compound_head_first_page(self):
