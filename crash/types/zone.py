@@ -75,7 +75,7 @@ class Zone(CrashBaseClass):
                 nr_free += 1
                 if page.get_nid() != self.nid or page.get_zid() != self.zid:
                     print("page {:#x} misplaced on {} of zone {}:{}, has flags for zone {}:{}".
-                        format(page_obj.address, "pcplist" if is_pcp else "freelist",
+                        format(long(page_obj.address), "pcplist" if is_pcp else "freelist",
                                 self.nid, self.zid, page.get_nid(), page.get_zid()))
         nr_expected = area["count"] if is_pcp else area["nr_free"]
         if nr_free != nr_expected:
