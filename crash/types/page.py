@@ -6,12 +6,12 @@ import gdb
 import types
 from crash.infra import CrashBaseClass, export
 from crash.util import container_of, find_member_variant
+from crash.cache.syscache import config
 
 # TODO: un-hardcode this
 VMEMMAP_START   = 0xffffea0000000000
 DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
-NODES_SHIFT     = 10
 
 #TODO debuginfo won't tell us, depends on version?
 PAGE_MAPPING_ANON = 1
@@ -21,6 +21,9 @@ class Page(CrashBaseClass):
     __type_callbacks__ = [ ('struct page', 'setup_page_type' ),
                            ('enum pageflags', 'setup_pageflags' ),
                            ('enum zone_type', 'setup_zone_type' ) ]
+    # TODO: this should better be generalized to some callback for
+    # "config is available" without refering to the symbol name here
+    __symbol_callbacks__ = [ ('kernel_config_data', 'setup_nodes_width' ) ]
 
     slab_cache_name = None
     slab_page_name = None
@@ -36,6 +39,7 @@ class Page(CrashBaseClass):
     setup_pageflags_finish_done = False
 
     ZONES_WIDTH = None
+    NODES_WIDTH = None
 
     @classmethod
     def setup_page_type(cls, gdbtype):
@@ -63,6 +67,11 @@ class Page(CrashBaseClass):
     def setup_zone_type(cls, gdbtype):
         max_nr_zones = gdbtype['__MAX_NR_ZONES'].enumval
         cls.ZONES_WIDTH = int(ceil(log(max_nr_zones)))
+
+    @classmethod
+    def setup_nodes_width(cls, symbol):
+        # TODO: handle kernels with no space for nodes in page flags
+        cls.NODES_WIDTH = int(config['NODES_SHIFT'])
 
     @classmethod
     def setup_pageflags_finish(cls):
@@ -134,11 +143,10 @@ class Page(CrashBaseClass):
         return self.gdb_obj[Page.slab_page_name]
 
     def get_nid(self):
-        # TODO unhardcode
-        return self.flags >> (64 - NODES_SHIFT)
+        return self.flags >> (64 - self.NODES_WIDTH)
 
     def get_zid(self):
-        shift = 64 - NODES_SHIFT - self.ZONES_WIDTH
+        shift = 64 - self.NODES_WIDTH - self.ZONES_WIDTH
         zid = self.flags >> shift & ((1 << self.ZONES_WIDTH) - 1)
         return zid
 
