@@ -17,7 +17,7 @@ PAGE_SIZE       = 4096L
 PAGE_MAPPING_ANON = 1
 
 class Page(CrashBaseClass):
-    __types__ = [ 'struct page', 'enum pageflags', 'enum zone_type' ]
+    __types__ = [ 'unsigned long', 'struct page', 'enum pageflags', 'enum zone_type' ]
     __type_callbacks__ = [ ('struct page', 'setup_page_type' ),
                            ('enum pageflags', 'setup_pageflags' ),
                            ('enum zone_type', 'setup_zone_type' ) ]
@@ -40,6 +40,8 @@ class Page(CrashBaseClass):
 
     ZONES_WIDTH = None
     NODES_WIDTH = None
+    # TODO have arch provide this?
+    BITS_PER_LONG = None
 
     @classmethod
     def setup_page_type(cls, gdbtype):
@@ -72,6 +74,9 @@ class Page(CrashBaseClass):
     def setup_nodes_width(cls, symbol):
         # TODO: handle kernels with no space for nodes in page flags
         cls.NODES_WIDTH = int(config['NODES_SHIFT'])
+        # piggyback on this callback because type callback doesn't seem to work
+        # for unsigned long
+        cls.BITS_PER_LONG = cls.unsigned_long_type.sizeof * 8
 
     @classmethod
     def setup_pageflags_finish(cls):
@@ -143,10 +148,10 @@ class Page(CrashBaseClass):
         return self.gdb_obj[Page.slab_page_name]
 
     def get_nid(self):
-        return self.flags >> (64 - self.NODES_WIDTH)
+        return self.flags >> (self.BITS_PER_LONG - self.NODES_WIDTH)
 
     def get_zid(self):
-        shift = 64 - self.NODES_WIDTH - self.ZONES_WIDTH
+        shift = self.BITS_PER_LONG - self.NODES_WIDTH - self.ZONES_WIDTH
         zid = self.flags >> shift & ((1 << self.ZONES_WIDTH) - 1)
         return zid
 
