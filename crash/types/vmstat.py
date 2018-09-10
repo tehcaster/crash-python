@@ -9,7 +9,6 @@ from crash.types.percpu import get_percpu_var
 from cpu import for_each_online_cpu
 
 # TODO: un-hardcode this
-VMEMMAP_START   = 0xffffea0000000000
 DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
 

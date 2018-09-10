@@ -9,7 +9,6 @@ from crash.util import container_of, find_member_variant
 from crash.cache.syscache import config
 
 # TODO: un-hardcode this
-VMEMMAP_START   = 0xffffea0000000000
 DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
 
@@ -23,11 +22,13 @@ class Page(CrashBaseClass):
                            ('enum zone_type', 'setup_zone_type' ) ]
     # TODO: this should better be generalized to some callback for
     # "config is available" without refering to the symbol name here
-    __symbol_callbacks__ = [ ('kernel_config_data', 'setup_nodes_width' ) ]
+    __symbol_callbacks__ = [ ('kernel_config_data', 'setup_nodes_width' ),
+                             ('vmemmap_base', 'setup_vmemmap_base' ) ]
 
     slab_cache_name = None
     slab_page_name = None
     compound_head_name = None
+    vmemmap_base = 0xffffea0000000000
     vmemmap = None
     pageflags = dict()
 
@@ -48,7 +49,7 @@ class Page(CrashBaseClass):
         cls.slab_cache_name = find_member_variant(gdbtype, ('slab_cache', 'lru'))
         cls.slab_page_name = find_member_variant(gdbtype, ('slab_page', 'lru'))
         cls.compound_head_name = find_member_variant(gdbtype, ('compound_head', 'first_page' ))
-        cls.vmemmap = gdb.Value(VMEMMAP_START).cast(gdbtype.pointer())
+        cls.vmemmap = gdb.Value(cls.vmemmap_base).cast(gdbtype.pointer())
 
         cls.setup_page_type_done = True
         if cls.setup_pageflags_done and not cls.setup_pageflags_finish_done:
@@ -64,6 +65,14 @@ class Page(CrashBaseClass):
             cls.setup_pageflags_finish()
 
         cls.PG_slab = 1L << cls.pageflags['PG_slab']
+
+    @classmethod
+    def setup_vmemmap_base(cls, symbol):
+        cls.vmemmap_base = long(symbol.value())
+        # setup_page_type() was first and used the hardcoded initial value,
+        # we have to update
+        if cls.vmemmap is not None:
+            cls.vmemmap = gdb.Value(cls.vmemmap_base).cast(cls.page_type.pointer())
 
     @classmethod
     def setup_zone_type(cls, gdbtype):
@@ -102,12 +111,12 @@ class Page(CrashBaseClass):
     @staticmethod
     def from_page_addr(addr):
         page_ptr = gdb.Value(addr).cast(Page.page_type.pointer())
-        pfn = (addr - VMEMMAP_START) / Page.page_type.sizeof
+        pfn = (addr - Page.vmemmap_base) / Page.page_type.sizeof
         return Page(page_ptr.dereference(), pfn)
 
     @staticmethod
     def from_obj(gdb_obj):
-        pfn = (long(gdb_obj.address) - VMEMMAP_START) / Page.page_type.sizeof
+        pfn = (long(gdb_obj.address) - Page.vmemmap_base) / Page.page_type.sizeof
         return Page(gdb_obj, pfn)
 
     @staticmethod

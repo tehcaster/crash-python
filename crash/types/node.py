@@ -9,7 +9,6 @@ from bitmap import for_each_set_bit
 import crash.types.zone
 
 # TODO: un-hardcode this
-VMEMMAP_START   = 0xffffea0000000000
 DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
 
