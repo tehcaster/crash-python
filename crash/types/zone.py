@@ -10,10 +10,6 @@ from crash.types.vmstat import VmStat
 from cpu import for_each_online_cpu
 from crash.types.list import list_for_each_entry
 
-# TODO: un-hardcode this
-DIRECTMAP_START = 0xffff880000000000
-PAGE_SIZE       = 4096L
-
 def getValue(sym):
     return gdb.lookup_symbol(sym, None)[0].value()
 

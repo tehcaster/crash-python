@@ -9,7 +9,6 @@ from crash.util import container_of, find_member_variant
 from crash.cache.syscache import config
 
 # TODO: un-hardcode this
-DIRECTMAP_START = 0xffff880000000000
 PAGE_SIZE       = 4096L
 
 #TODO debuginfo won't tell us, depends on version?
@@ -23,13 +22,15 @@ class Page(CrashBaseClass):
     # TODO: this should better be generalized to some callback for
     # "config is available" without refering to the symbol name here
     __symbol_callbacks__ = [ ('kernel_config_data', 'setup_nodes_width' ),
-                             ('vmemmap_base', 'setup_vmemmap_base' ) ]
+                             ('vmemmap_base', 'setup_vmemmap_base' ),
+                             ('page_offset_base', 'setup_directmap_base' ) ]
 
     slab_cache_name = None
     slab_page_name = None
     compound_head_name = None
     vmemmap_base = 0xffffea0000000000
     vmemmap = None
+    directmap_base = 0xffff880000000000
     pageflags = dict()
 
     PG_tail = None
@@ -75,6 +76,10 @@ class Page(CrashBaseClass):
             cls.vmemmap = gdb.Value(cls.vmemmap_base).cast(cls.page_type.pointer())
 
     @classmethod
+    def setup_directmap_base(cls, symbol):
+        cls.directmap_base = long(symbol.value())
+
+    @classmethod
     def setup_zone_type(cls, gdbtype):
         max_nr_zones = gdbtype['__MAX_NR_ZONES'].enumval
         cls.ZONES_WIDTH = int(ceil(log(max_nr_zones)))
@@ -106,7 +111,7 @@ class Page(CrashBaseClass):
 
     @staticmethod
     def from_addr(addr):
-        return Page.from_pfn((addr - DIRECTMAP_START) / PAGE_SIZE)
+        return Page.from_pfn((addr - Page.directmap_base) / PAGE_SIZE)
 
     @staticmethod
     def from_page_addr(addr):

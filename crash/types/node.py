@@ -8,10 +8,6 @@ from crash.types.percpu import get_percpu_var
 from bitmap import for_each_set_bit
 import crash.types.zone
 
-# TODO: un-hardcode this
-DIRECTMAP_START = 0xffff880000000000
-PAGE_SIZE       = 4096L
-
 class TypesNodeUtilsClass(CrashBaseClass):
     __symbols__ = [ 'numa_node' ]
 

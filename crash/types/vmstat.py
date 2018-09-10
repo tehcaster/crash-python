@@ -8,10 +8,6 @@ import crash.types.node
 from crash.types.percpu import get_percpu_var
 from cpu import for_each_online_cpu
 
-# TODO: un-hardcode this
-DIRECTMAP_START = 0xffff880000000000
-PAGE_SIZE       = 4096L
-
 class VmStat(CrashBaseClass):
     __types__ = ['enum zone_stat_item', 'enum vm_event_item']
     __type_callbacks__ = [ ('enum zone_stat_item', 'check_enum_type'),
