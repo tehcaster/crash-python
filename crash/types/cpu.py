@@ -19,7 +19,7 @@ def __get_cpus_mask(sym_mask):
 def for_each_online_cpu():
     global cpus_online
     if cpus_online is None:
-        cpus_online = __get_cpus_mask("__cpu_online_mask")
+        cpus_online = __get_cpus_mask("cpu_online_mask")
     for cpu in cpus_online:
         yield cpu
 
