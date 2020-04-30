@@ -36,6 +36,7 @@ class Page:
     PG_tail = -1
     PG_slab = -1
     PG_lru = -1
+    PG_head = -1
 
     setup_page_type_done = False
     setup_pageflags_done = False
@@ -111,6 +112,7 @@ class Page:
 
         cls.PG_slab = 1 << cls.pageflags['PG_slab']
         cls.PG_lru = 1 << cls.pageflags['PG_lru']
+        cls.PG_head = 1 << cls.pageflags['PG_head']
 
     @classmethod
     def setup_vmemmap_base(cls, symbol: gdb.Symbol) -> None:
@@ -200,6 +202,9 @@ class Page:
     def is_lru(self) -> bool:
         return bool(self.flags & self.PG_lru)
 
+    def is_head(self) -> bool:
+        return bool(self.flags & self.PG_head)
+
     def is_anon(self) -> bool:
         mapping = int(self.gdb_obj["mapping"])
         return (mapping & PAGE_MAPPING_ANON) != 0
@@ -223,6 +228,10 @@ class Page:
         zid = self.flags >> shift & ((1 << self.ZONES_WIDTH) - 1)
         return zid
 
+    def get_count(self) -> int:
+        head = self.compound_head()
+        return int(head.gdb_obj["_refcount"]["counter"])
+
     def __compound_head_first_page(self) -> int:
         return int(self.gdb_obj['first_page'])
 
@@ -237,6 +246,12 @@ class Page:
             return self
 
         return self.__class__.from_page_addr(self.__compound_head())
+
+    def compound_order(self) -> int:
+        head = self.compound_head()
+        first_tail = Page.pfn_to_page(head.pfn + 1)
+        return int(first_tail["compound_order"])
+		
 
 type_cbs = TypeCallbacks([('struct page', Page.setup_page_type),
                           ('enum pageflags', Page.setup_pageflags),
