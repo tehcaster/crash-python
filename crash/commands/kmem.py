@@ -127,6 +127,8 @@ class KmemCommand(Command):
             print(f"0x{addr:x} belongs to a struct page 0x{page.address:x} "
                   f"pfn {page.pfn}")
 
+            page.dump()
+
             if page.compound_head().is_slab():
                 slab = slab_from_page(page)
                 name = slab.kmem_cache.name
@@ -227,6 +229,10 @@ class KmemCommand(Command):
             print("NODE: %d  ZONE: %d  ADDR: %x  NAME: \"%s\"" %
                   (int(zone_struct["node"]), zone.zid,
                    int(zone_struct.address), zone_struct["name"].string()))
+
+            start_pfn = int(zone_struct["zone_start_pfn"])
+            end_pfn = start_pfn + int(zone_struct["spanned_pages"])
+            print(f"PFN span [{start_pfn}, {end_pfn})")
 
             if not zone.is_populated():
                 print("  [unpopulated]")

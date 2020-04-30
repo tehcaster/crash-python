@@ -3,12 +3,12 @@
 
 from typing import List
 
-from crash.util import array_for_each
+from crash.util import array_size, array_for_each
 from crash.util.symbols import Types
 from crash.types.percpu import get_percpu_var
 from crash.types.vmstat import VmStat
 from crash.types.cpu import for_each_online_cpu
-from crash.types.list import list_for_each_entry
+from crash.types.list import list_for_each_entry, CorruptListError
 import crash.types.page
 
 import gdb
@@ -46,35 +46,115 @@ class Zone:
         self.add_vmstat_diffs(diffs)
         return diffs
 
-    def _check_free_area(self, area: gdb.Value, is_pcp: bool) -> None:
+    # mimic check_new_page_bad(), but not completely, we have not yet
+    # grabbed the page from freelist, so instead of -1 mapcount we want
+    # PageBuddy, and buddy page order match the freelist's
+    def _check_freelist_page(self, page, expected_order):
+        errors = ""
+
+        page_count = page.page_count()
+        if page_count != 0:
+            errors += f"page_count={page_count} "
+
+        if not page.is_buddy():
+            errors += f"PageBuddy()=false "
+
+        page_order = int(page.gdb_obj["private"])
+        if page_order != expected_order:
+            errors += f"buddy_order={page_order} "
+
+        mapping = int(page.gdb_obj["mapping"])
+        if mapping != 0:
+            errors += f"mapping=0x{mapping:x} "
+
+        flags = int(page.gdb_obj["flags"])
+        if flags & page.PAGE_FLAGS_CHECK_AT_PREP != 0:
+            errors += f"flags "
+
+        memcg = int(page.gdb_obj["mem_cgroup"])
+        if memcg != 0:
+            errors += f"memcg=0x{memcg:x} "
+
+        return errors
+
+    # mimic free_pages_check_bad()
+    def _check_pcplist_page(self, page):
+        errors = ""
+
+        page_count = page.page_count()
+        if page_count != 0:
+            errors += f"page_count={page_count} "
+
+        mapcount = page.page_mapcount()
+        if mapcount != -1:
+            errors += f"raw_page_mapcount={mapcount} "
+
+        mapping = int(page.gdb_obj["mapping"])
+        if mapping != 0:
+            errors += f"mapping=0x{mapping:x} "
+
+        if page.is_buddy():
+            errors += f"PageBuddy()=true "
+
+        flags = int(page.gdb_obj["flags"])
+        if flags & page.PAGE_FLAGS_CHECK_AT_FREE != 0:
+            errors += f"flags "
+
+        memcg = int(page.gdb_obj["mem_cgroup"])
+        if memcg != 0:
+            errors += f"memcg=0x{memcg:x} "
+
+        return errors
+
+    def _check_free_area(self, area: gdb.Value, is_pcp: bool, order_cpu: int) -> None:
         nr_free = 0
         if is_pcp:
             list_array_name = "lists"
             error_desc = "pcplist"
+            order_cpu_desc = f"cpu {order_cpu}"
         else:
             list_array_name = "free_list"
             error_desc = "free area"
-        for free_list in array_for_each(area[list_array_name]):
+            order_cpu_desc = f"order {order_cpu}"
+        for mt in range(array_size(area[list_array_name])):
+            free_list = area[list_array_name][mt]
             try:
                 for page_obj in list_for_each_entry(free_list,
                                                     self.types.page_type,
                                                     "lru"):
                     page = crash.types.page.Page.from_obj(page_obj)
+                    if not page:
+                        print(f"page 0x{int(page_obj.address):x} is not a valid page pointer on "
+                              f"{error_desc} of node {self.nid} zone {self.zid}, {order_cpu_desc} mt {mt}")
+                        continue
+                    
                     nr_free += 1
+
+                    if is_pcp:
+                        errors = self._check_pcplist_page(page)
+                    else:
+                        errors = self._check_freelist_page(page, order_cpu)
+                    
+                    if errors != "":
+                        print(f"page 0x{int(page_obj.address):x} pfn {page.pfn} on {error_desc} of node "
+                              f"{self.nid} zone {self.zid}, {order_cpu_desc} mt {mt} had unexpected state: {errors}")
                     if page.get_nid() != self.nid or page.get_zid() != self.zid:
-                        print(f"page 0x{int(page_obj.address):x} misplaced on "
-                              f"{error_desc} of node {self.nid} zone {self.zid}, "
+                        print(f"page 0x{int(page_obj.address):x} pfn {page.pfn} misplaced on "
+                              f"{error_desc} of node {self.nid} zone {self.zid}, {order_cpu_desc} mt {mt} "
                               f"has flags for node {page.get_nid()} zone {page.get_zid()}")
+            except CorruptListError as e:
+                print(f"Error traversing {error_desc} 0x{int(area.address):x} for {order_cpu_desc} mt {mt}: {e}")
             except BufferError as e:
-                print(f"Error traversing free area: {e}")
+                print(f"Error traversing {error_desc} 0x{int(area.address):x} for {order_cpu_desc} mt {mt}: {e}")
         nr_expected = area["count"] if is_pcp else area["nr_free"]
         if nr_free != nr_expected:
-            print(f"nr_free mismatch in {error_desc} 0x{int(area.address):x}: "
+            print(f"nr_free mismatch in {error_desc} 0x{int(area.address):x} for {order_cpu_desc}: "
                   f"expected {nr_expected}, counted {nr_free}")
 
     def check_free_pages(self) -> None:
-        for area in array_for_each(self.gdb_obj["free_area"]):
-            self._check_free_area(area, False)
+        for order in range(array_size(self.gdb_obj["free_area"])):
+            area = self.gdb_obj["free_area"][order]
+            self._check_free_area(area, False, order)
         for cpu in for_each_online_cpu():
             pageset = get_percpu_var(self.gdb_obj["pageset"], cpu)
-            self._check_free_area(pageset["pcp"], True)
+            self._check_free_area(pageset["pcp"], True, cpu)

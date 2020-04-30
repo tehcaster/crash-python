@@ -24,6 +24,10 @@ symvals = Symvals(['mem_section', 'max_pfn'])
 
 PageType = TypeVar('PageType', bound='Page')
 
+_PAGE_FLAGS_CHECK_AT_FREE = \
+    ["PG_lru", "PG_locked", "PG_private", "PG_private_2", "PG_writeback",
+     "PG_reserved", "PG_slab", "PG_active", "PG_unevictable", "PG_mlocked"]
+
 class Page:
     slab_cache_name = None
     slab_page_name = None
@@ -37,6 +41,9 @@ class Page:
     PG_slab = -1
     PG_lru = -1
     PG_head = -1
+
+    PAGE_FLAGS_CHECK_AT_FREE = 0
+    PAGE_FLAGS_CHECK_AT_PREP = 0
 
     setup_page_type_done = False
     setup_pageflags_done = False
@@ -105,7 +112,7 @@ class Page:
     def setup_pageflags(cls, gdbtype: gdb.Type) -> None:
         for field in gdbtype.fields():
             cls.pageflags[field.name] = field.enumval
-
+    
         cls.setup_pageflags_done = True
         if cls.setup_page_type_done and not cls.setup_pageflags_finish_done:
             cls.setup_pageflags_finish()
@@ -113,6 +120,14 @@ class Page:
         cls.PG_slab = 1 << cls.pageflags['PG_slab']
         cls.PG_lru = 1 << cls.pageflags['PG_lru']
         cls.PG_head = 1 << cls.pageflags['PG_head']
+
+        flags_check = 0
+        for flagname in _PAGE_FLAGS_CHECK_AT_FREE:
+            flags_check |= 1 << cls.pageflags[flagname]
+
+        cls.PAGE_FLAGS_CHECK_AT_FREE = flags_check
+        NR_PAGEFLAGS = cls.pageflags["__NR_PAGEFLAGS"]
+        cls.PAGE_FLAGS_CHECK_AT_PREP = (1 << NR_PAGEFLAGS) - 1
 
     @classmethod
     def setup_vmemmap_base(cls, symbol: gdb.Symbol) -> None:
@@ -171,6 +186,9 @@ class Page:
     @classmethod
     def from_obj(cls, page: gdb.Value) -> 'Page':
         pfn = (int(page.address) - Page.vmemmap_base) // types.page_type.sizeof
+        max_pfn = int(symvals.max_pfn)
+        if pfn < 0 or pfn > max_pfn:
+            return None
         return Page(page, pfn)
 
     @classmethod
@@ -208,6 +226,13 @@ class Page:
     def is_anon(self) -> bool:
         mapping = int(self.gdb_obj["mapping"])
         return (mapping & PAGE_MAPPING_ANON) != 0
+
+    def is_buddy(self) -> bool:
+        page_type = int(self.gdb_obj["page_type"])
+        
+        base = 0xf0000000
+        PG_buddy = 0x00000080
+        return (page_type & (base | PG_buddy)) == base
 
     def get_slab_cache(self) -> gdb.Value:
         if Page.slab_cache_name == "lru":
@@ -252,6 +277,18 @@ class Page:
         first_tail = Page.pfn_to_page(head.pfn + 1)
         return int(first_tail["compound_order"])
 		
+    def page_count(self) -> int:
+        head = self.compound_head()
+        return int(head.gdb_obj["_refcount"]["counter"])
+
+    def page_mapcount(self) -> int:
+        return int(self.gdb_obj["_mapcount"]["counter"])
+
+    def dump(self) -> None:
+        print("dumping page:")
+        
+        
+		
 
 type_cbs = TypeCallbacks([('struct page', Page.setup_page_type),
                           ('enum pageflags', Page.setup_pageflags),
@@ -283,7 +320,7 @@ def safe_page_from_page_addr(addr: int) -> Optional[Page]:
     pfn = (addr - Page.vmemmap_base) // types.page_type.sizeof
     if pfn > int(symvals.max_pfn):
         return None
-    return Page.from_page_addr(addr)
+    return pfn_to_page(pfn)
 
 def page_from_gdb_obj(gdb_obj: gdb.Value) -> 'Page':
     pfn = (int(gdb_obj.address) - Page.vmemmap_base) // types.page_type.sizeof

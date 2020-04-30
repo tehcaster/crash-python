@@ -696,8 +696,8 @@ class KmemCache(ABC):
         self.gdb_obj = gdb_obj
         self.address = int(gdb_obj.address)
 
-        self.size = int(gdb_obj["size"])
-        self.object_size = int(gdb_obj["object_size"])
+#        self.size = int(gdb_obj["size"])
+#        self.object_size = int(gdb_obj["object_size"])
         self.flags = int(gdb_obj["flags"])
 
         self.objs_per_slab = 0
