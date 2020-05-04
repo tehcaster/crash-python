@@ -7,7 +7,7 @@ from typing import Dict, Union, TypeVar, Iterable, Callable, Tuple,\
 from math import log, ceil
 
 import crash
-from crash.util import find_member_variant
+from crash.util import find_member_variant, get_typed_pointer
 from crash.util.symbols import Types, Symvals, TypeCallbacks
 from crash.util.symbols import SymbolCallbacks, MinimalSymbolCallbacks
 from crash.cache.syscache import config
@@ -19,14 +19,18 @@ import gdb
 PAGE_MAPPING_ANON = 1
 
 types = Types(['unsigned long', 'struct page', 'enum pageflags',
-               'enum zone_type', 'struct mem_section'])
-symvals = Symvals(['mem_section', 'max_pfn'])
+               'enum zone_type', 'struct mem_section', 'enum page_ext_flags',
+               'struct page_owner'])
+symvals = Symvals(['mem_section', 'max_pfn', 'page_ext_size', 'page_owner_ops'])
 
 PageType = TypeVar('PageType', bound='Page')
 
 _PAGE_FLAGS_CHECK_AT_FREE = \
     ["PG_lru", "PG_locked", "PG_private", "PG_private_2", "PG_writeback",
      "PG_reserved", "PG_slab", "PG_active", "PG_unevictable", "PG_mlocked"]
+
+gfpflag_names = list()
+pageflag_names = list()
 
 class Page:
     slab_cache_name = None
@@ -36,6 +40,7 @@ class Page:
     vmemmap: gdb.Value
     directmap_base = 0xffff880000000000
     pageflags: Dict[str, int] = dict()
+    page_ext_flags: Dict[str, int] = dict()
 
     PG_tail = -1
     PG_slab = -1
@@ -57,8 +62,11 @@ class Page:
     PAGE_SIZE = 4096
     PAGE_SHIFT = 12
 
-    sparsemem = False
-    SECTION_SIZE_BITS = -1 # Depends on sparsemem=True
+    # TODO these are from x86 SLES kernels
+    sparsemem = True
+    sparsemem_vmemmap = True
+    sparsemem_extreme = True
+    SECTION_SIZE_BITS = 27 # Depends on sparsemem=True
     SECTIONS_PER_ROOT = -1 # Depends on SPARSEMEM_EXTREME
 
     _is_tail: Callable[['Page'], bool]
@@ -74,6 +82,8 @@ class Page:
             cls.directmap_base = 0xc000000000000000
 
             cls.sparsemem = True
+            cls.sparsemem_vmemmap = False
+            cls.sparsemem_extreme = False
             cls.SECTION_SIZE_BITS = 24
 
         cls.PAGE_SIZE = 1 << cls.PAGE_SHIFT
@@ -90,16 +100,24 @@ class Page:
 
     @classmethod
     def setup_mem_section(cls, gdbtype: gdb.Type) -> None:
-        # TODO assumes SPARSEMEM_EXTREME
-        cls.SECTIONS_PER_ROOT = cls.PAGE_SIZE // gdbtype.sizeof
+        if cls.sparsemem_extreme:
+            cls.SECTIONS_PER_ROOT = cls.PAGE_SIZE // gdbtype.sizeof
+        else:
+            cls.SECTIONS_PER_ROOT = 1
+
+    @classmethod
+    def pfn_to_section(cls, pfn: int) -> gdb.Value:
+        section_nr = pfn >> (cls.SECTION_SIZE_BITS - cls.PAGE_SHIFT)
+        root_idx = section_nr // cls.SECTIONS_PER_ROOT
+        offset = section_nr & (cls.SECTIONS_PER_ROOT - 1)
+        section = symvals.mem_section[root_idx][offset]
+       
+        return section 
 
     @classmethod
     def pfn_to_page(cls, pfn: int) -> gdb.Value:
-        if cls.sparsemem:
-            section_nr = pfn >> (cls.SECTION_SIZE_BITS - cls.PAGE_SHIFT)
-            root_idx = section_nr // cls.SECTIONS_PER_ROOT
-            offset = section_nr & (cls.SECTIONS_PER_ROOT - 1)
-            section = symvals.mem_section[root_idx][offset]
+        if not cls.sparsemem_vmemmap:
+            section = cls.pfn_to_section(pfn)            
 
             pagemap = section["section_mem_map"] & ~3
             return (pagemap.cast(types.page_type.pointer()) + pfn).dereference()
@@ -107,6 +125,11 @@ class Page:
         # pylint doesn't have the visibility it needs to evaluate this
         # pylint: disable=unsubscriptable-object
         return cls.vmemmap[pfn]
+
+    @classmethod
+    def setup_page_ext_flags(cls, gdbtype: gdb.Type) -> None:
+        for field in gdbtype.fields():
+            cls.page_ext_flags[field.name] = field.enumval
 
     @classmethod
     def setup_pageflags(cls, gdbtype: gdb.Type) -> None:
@@ -284,24 +307,82 @@ class Page:
     def page_mapcount(self) -> int:
         return int(self.gdb_obj["_mapcount"]["counter"])
 
+    def dump_page_owner(self) -> None:
+        section = Page.pfn_to_section(self.pfn)
+        base = section["page_ext"]
+        page_ext_size = int(symvals.page_ext_size)
+        page_ext_addr = int(base) + self.pfn * page_ext_size
+
+        page_ext = get_typed_pointer(page_ext_addr, base.type)
+
+        ext_flags = int(page_ext["flags"])
+        has_page_owner = ext_flags & 1 << self.page_ext_flags["PAGE_EXT_OWNER"] != 0
+        page_owner_alloc = ext_flags & 1 << self.page_ext_flags["PAGE_EXT_OWNER_ALLOCATED"] != 0
+
+        print(f"page_owner={has_page_owner} page_owner_allocated={page_owner_alloc}")
+
+        page_owner_offset = int(symvals.page_owner_ops["offset"])
+        page_owner = get_typed_pointer(page_ext_addr + page_owner_offset, types.page_owner_type)
+
+        print(page_owner.dereference())
+        order = int(page_owner["order"])
+        mt = int(page_owner["migratetype"])
+        migreason = int(page_owner["last_migrate_reason"]
+        flags_str = gfpflags_to_str(int(page_owner["gfp_mask"]))
+        print ("order={order}, migratetype={mt}, gfp_mask={flags_str}, mig={migreason}")
+
     def dump(self) -> None:
         print("dumping page:")
-        
+        self.dump_page_owner()
         
 		
 
 type_cbs = TypeCallbacks([('struct page', Page.setup_page_type),
                           ('enum pageflags', Page.setup_pageflags),
+                          ('enum page_ext_flags', Page.setup_page_ext_flags),
                           ('enum zone_type', Page.setup_zone_type),
                           ('struct mem_section', Page.setup_mem_section)])
 msymbol_cbs = MinimalSymbolCallbacks([('kernel_config_data',
                                        Page.setup_nodes_width)])
 
+def _setup_flag_names(symbol: gdb.Symbol) -> None:
+    flag_names = list()
+    array = symbol.value()
+    i = 0
+    val = array[0]
+    while val["mask"] != 0 and val["name"] != 0:
+        flag_names.append((int(val["mask"]), str(val["name"])))
+        i += 1
+        val = array[i]
+    if symbol.name == "gfpflag_names":
+        gfpflag_names = flag_names
+    elif symbo.name == "pageflag_names":
+        pageflag_names = flag_names
+    else:
+        raise RuntimeException("unknown symbol passed")
+    
+def flags_to_str(flags: int, flagnames: list) -> str:
+    out = ""
+    for (val, name) in flagnames:
+        if out == "":
+            out = name
+        else:
+            out += "|" + name
+    return out
+
+def gfpflags_to_str(flags: int) -> str:
+    return flags_to_str(flags, gfpflag_names)
+
+def pageflags_to_str(flags: int) -> str:
+    return flags_to_str(flags, pageflag_names)
+
 # TODO: this should better be generalized to some callback for
 # "config is available" without refering to the symbol name here
 symbol_cbs = SymbolCallbacks([('vmemmap_base', Page.setup_vmemmap_base),
                               ('page_offset_base',
-                               Page.setup_directmap_base)])
+                               Page.setup_directmap_base),
+                              ('gfpflag_names', _setup_gfpflag_names),
+                              ('pageflag_names', _setup_gfpflag_names)])
 
 def page_addr(struct_page_addr: int) -> int:
     pfn = (struct_page_addr - Page.vmemmap_base) // types.page_type.sizeof
