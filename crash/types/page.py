@@ -12,6 +12,7 @@ from crash.util.symbols import Types, Symvals, TypeCallbacks
 from crash.util.symbols import SymbolCallbacks, MinimalSymbolCallbacks
 from crash.cache.syscache import config
 from crash.exceptions import DelayedAttributeError
+from crash.types.stack_depot import StackTrace
 
 import gdb
 
@@ -326,10 +327,13 @@ class Page:
 
         print(page_owner.dereference())
         order = int(page_owner["order"])
-        mt = int(page_owner["migratetype"])
-        migreason = int(page_owner["last_migrate_reason"]
+        migreason = int(page_owner["last_migrate_reason"])
         flags_str = gfpflags_to_str(int(page_owner["gfp_mask"]))
-        print ("order={order}, migratetype={mt}, gfp_mask={flags_str}, mig={migreason}")
+        print(f"order={order}, gfp_mask={flags_str}, mig={migreason}")
+
+        alloc_stack = StackTrace.from_handle(page_owner["handle"])
+        print("Allocation stack:")
+        alloc_stack.dump()
 
     def dump(self) -> None:
         print("dumping page:")
@@ -346,17 +350,19 @@ msymbol_cbs = MinimalSymbolCallbacks([('kernel_config_data',
                                        Page.setup_nodes_width)])
 
 def _setup_flag_names(symbol: gdb.Symbol) -> None:
+    global gfpflag_names, pageflag_names
+
     flag_names = list()
     array = symbol.value()
     i = 0
     val = array[0]
     while val["mask"] != 0 and val["name"] != 0:
-        flag_names.append((int(val["mask"]), str(val["name"])))
+        flag_names.append((int(val["mask"]), str(val["name"].string())))
         i += 1
         val = array[i]
     if symbol.name == "gfpflag_names":
         gfpflag_names = flag_names
-    elif symbo.name == "pageflag_names":
+    elif symbol.name == "pageflag_names":
         pageflag_names = flag_names
     else:
         raise RuntimeException("unknown symbol passed")
@@ -364,16 +370,23 @@ def _setup_flag_names(symbol: gdb.Symbol) -> None:
 def flags_to_str(flags: int, flagnames: list) -> str:
     out = ""
     for (val, name) in flagnames:
+        if flags & val != val:
+            continue
         if out == "":
             out = name
         else:
             out += "|" + name
+
+        flags &= ~val
+
     return out
 
 def gfpflags_to_str(flags: int) -> str:
     return flags_to_str(flags, gfpflag_names)
 
 def pageflags_to_str(flags: int) -> str:
+    NR_PAGEFLAGS = Page.pageflags["__NR_PAGEFLAGS"]
+    flags &= (1 << NR_PAGEFLAGS) - 1
     return flags_to_str(flags, pageflag_names)
 
 # TODO: this should better be generalized to some callback for
@@ -381,8 +394,8 @@ def pageflags_to_str(flags: int) -> str:
 symbol_cbs = SymbolCallbacks([('vmemmap_base', Page.setup_vmemmap_base),
                               ('page_offset_base',
                                Page.setup_directmap_base),
-                              ('gfpflag_names', _setup_gfpflag_names),
-                              ('pageflag_names', _setup_gfpflag_names)])
+                              ('gfpflag_names', _setup_flag_names),
+                              ('pageflag_names', _setup_flag_names)])
 
 def page_addr(struct_page_addr: int) -> int:
     pfn = (struct_page_addr - Page.vmemmap_base) // types.page_type.sizeof

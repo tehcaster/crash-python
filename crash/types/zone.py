@@ -10,6 +10,7 @@ from crash.types.vmstat import VmStat
 from crash.types.cpu import for_each_online_cpu
 from crash.types.list import list_for_each_entry, CorruptListError
 import crash.types.page
+from crash.types.page import pageflags_to_str
 
 import gdb
 
@@ -69,7 +70,8 @@ class Zone:
 
         flags = int(page.gdb_obj["flags"])
         if flags & page.PAGE_FLAGS_CHECK_AT_PREP != 0:
-            errors += f"flags "
+            bad_flags = pageflags_to_str(flags & page.PAGE_FLAGS_CHECK_AT_PREP) 
+            errors += f"flags {bad_flags} "
 
         memcg = int(page.gdb_obj["mem_cgroup"])
         if memcg != 0:
@@ -98,7 +100,8 @@ class Zone:
 
         flags = int(page.gdb_obj["flags"])
         if flags & page.PAGE_FLAGS_CHECK_AT_FREE != 0:
-            errors += f"flags "
+            bad_flags = pageflags_to_str(flags & page.PAGE_FLAGS_CHECK_AT_FREE)
+            errors += f"flags {bad_flags} "
 
         memcg = int(page.gdb_obj["mem_cgroup"])
         if memcg != 0:
