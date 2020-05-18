@@ -3,7 +3,7 @@
 
 import crash
 from crash.util.symbols import Types, Symvals
-
+from crash.types.kallsyms import kallsyms_lookup
 import gdb
 
 types = Types(['union handle_parts', 'struct stack_record'])
@@ -19,16 +19,16 @@ class StackTrace:
         self.nr_entries = nr_entries
         self.entries = entries
 
-    def dump(self):
+    def dump(self, prefix = ""):
         for i in range(self.nr_entries):
             addr = int(self.entries[i])
-            print(hex(addr))
+            sym = kallsyms_lookup(addr)
+            print(f"{prefix}0x{addr:x} {sym}")
 
     @classmethod
     def from_handle(cls, handle: gdb.Value) -> 'StackTrace':
         
         parts = handle.address.cast(types.union_handle_parts_type.pointer())
-        print(parts.dereference())
 
         slab = symvals.stack_slabs[parts["slabindex"]]
         offset = parts["offset"] << STACK_ALLOC_ALIGN

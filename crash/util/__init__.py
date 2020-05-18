@@ -397,6 +397,14 @@ def get_typed_pointer(val: AddressSpecifier, gdbtype: gdb.Type) -> gdb.Value:
 
     return ret
 
+def get_minsymbol_pointer(symname: str, gdbtype: gdb.Type) -> gdb.Value:
+    sym = gdb.lookup_minimal_symbol(symname)
+    addr = sym.value().address
+    return addr.cast(gdbtype.pointer())
+
+def get_minsymbol_value(symname: str, gdbtype: gdb.Type) -> gdb.Value:
+    return get_minsymbol_pointer(symname, gdbtype).dereference()
+
 def array_for_each(value: gdb.Value) -> Iterator[gdb.Value]:
     """
     Yields each element in an array separately

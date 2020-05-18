@@ -5,6 +5,7 @@ from typing import Dict, Union, TypeVar, Iterable, Callable, Tuple,\
                    Optional
 
 from math import log, ceil
+import ctypes
 
 import crash
 from crash.util import find_member_variant, get_typed_pointer
@@ -32,6 +33,12 @@ _PAGE_FLAGS_CHECK_AT_FREE = \
 
 gfpflag_names = list()
 pageflag_names = list()
+pagetype_names = [
+    (0x00000080, 'buddy'),
+    (0x00000100, 'offline'),
+    (0x00000200, 'kmemcg'),
+    (0x00000400, 'pgtable'),
+    (0x00000800, 'guard')]
 
 class Page:
     slab_cache_name = None
@@ -51,6 +58,7 @@ class Page:
     PAGE_FLAGS_CHECK_AT_FREE = 0
     PAGE_FLAGS_CHECK_AT_PREP = 0
 
+    PAGE_MAPCOUNT_RESERVE = -128
     setup_page_type_done = False
     setup_pageflags_done = False
     setup_pageflags_finish_done = False
@@ -315,6 +323,8 @@ class Page:
         page_ext_addr = int(base) + self.pfn * page_ext_size
 
         page_ext = get_typed_pointer(page_ext_addr, base.type)
+        if int(page_ext) == 0:
+            return
 
         ext_flags = int(page_ext["flags"])
         has_page_owner = ext_flags & 1 << self.page_ext_flags["PAGE_EXT_OWNER"] != 0
@@ -325,18 +335,47 @@ class Page:
         page_owner_offset = int(symvals.page_owner_ops["offset"])
         page_owner = get_typed_pointer(page_ext_addr + page_owner_offset, types.page_owner_type)
 
-        print(page_owner.dereference())
         order = int(page_owner["order"])
+
         migreason = int(page_owner["last_migrate_reason"])
+        if migreason != -1:
+            migreason_str = f"last_migrate_reason={migreason}"
+        else:
+            migreason_str = ""
+
         flags_str = gfpflags_to_str(int(page_owner["gfp_mask"]))
-        print(f"order={order}, gfp_mask={flags_str}, mig={migreason}")
+        print(f"order={order}, gfp_mask={flags_str}, {migreason_str}")
 
         alloc_stack = StackTrace.from_handle(page_owner["handle"])
         print("Allocation stack:")
-        alloc_stack.dump()
+        alloc_stack.dump("  ")
+
+        free_stack = StackTrace.from_handle(page_owner["free_handle"])
+        print("Freeing stack:")
+        free_stack.dump("  ")
+        
 
     def dump(self) -> None:
         print("dumping page:")
+
+        count = self.page_count()
+        mapcount = self.page_mapcount()
+        
+        if mapcount >= self.PAGE_MAPCOUNT_RESERVE:
+            mapcount_str = f"mapcount={mapcount+1}"
+        else:
+            page_type = int(self.gdb_obj["page_type"])
+            page_type_str = pagetype_to_str(page_type)
+            mapcount_str = f"page_type={page_type_str}"
+        raw_mapcount = ctypes.c_uint(mapcount).value
+
+        flags_str = pageflags_to_str(self.flags)
+        if flags_str != "": 
+            flags_str = f" ({flags_str})"
+
+        print(f"page_count={count} {mapcount_str} (raw mapcount:0x{raw_mapcount:x}) "
+              f"flags=0x{self.flags:x}{flags_str}")
+
         self.dump_page_owner()
         
 		
@@ -388,6 +427,9 @@ def pageflags_to_str(flags: int) -> str:
     NR_PAGEFLAGS = Page.pageflags["__NR_PAGEFLAGS"]
     flags &= (1 << NR_PAGEFLAGS) - 1
     return flags_to_str(flags, pageflag_names)
+
+def pagetype_to_str(flags: int) -> str:
+    return flags_to_str(~flags, pagetype_names)
 
 # TODO: this should better be generalized to some callback for
 # "config is available" without refering to the symbol name here

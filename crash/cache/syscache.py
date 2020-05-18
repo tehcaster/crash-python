@@ -283,5 +283,15 @@ utsname = CrashUtsnameCache()
 config = CrashConfigCache()
 kernel = CrashKernelCache(config)
 
+def config_enabled(key: str) -> bool:
+    val = config[key]
+    if val is None:
+        return False
+
+    if val == "y" or val == "m":
+        return True
+
+    return False
+
 def jiffies_to_msec(jiffies: int) -> int:
     return 1000 // kernel.hz * jiffies
