@@ -58,7 +58,8 @@ class Zone:
             errors += f"page_count={page_count} "
 
         if not page.is_buddy():
-            errors += f"PageBuddy()=false "
+            mapcount = page.page_mapcount()
+            errors += f"not PageBuddy (raw mapcount={mapcount}) "
 
         page_order = int(page.gdb_obj["private"])
         if page_order != expected_order:
@@ -121,34 +122,41 @@ class Zone:
             order_cpu_desc = f"order {order_cpu}"
         for mt in range(array_size(area[list_array_name])):
             free_list = area[list_array_name][mt]
-            try:
-                for page_obj in list_for_each_entry(free_list,
-                                                    self.types.page_type,
-                                                    "lru"):
-                    page = crash.types.page.Page.from_obj(page_obj)
-                    if not page:
-                        print(f"page 0x{int(page_obj.address):x} is not a valid page pointer on "
-                              f"{error_desc} of node {self.nid} zone {self.zid}, {order_cpu_desc} mt {mt}")
-                        continue
-                    
-                    nr_free += 1
+            for reverse in [False, True]:
+                if reverse:
+                    print("Retrying list in reverse direction")
+                try:
+                    for page_obj in list_for_each_entry(free_list,
+                                                        self.types.page_type,
+                                                        "lru",
+                                                        reverse=reverse):
+                        page = crash.types.page.Page.from_obj(page_obj)
+                        if not page:
+                            print(f"page 0x{int(page_obj.address):x} is not a valid page pointer on "
+                                  f"{error_desc} of node {self.nid} zone {self.zid}, {order_cpu_desc} mt {mt}")
+                            continue
+                        
+                        nr_free += 1
 
-                    if is_pcp:
-                        errors = self._check_pcplist_page(page)
-                    else:
-                        errors = self._check_freelist_page(page, order_cpu)
-                    
-                    if errors != "":
-                        print(f"page 0x{int(page_obj.address):x} pfn {page.pfn} on {error_desc} of node "
-                              f"{self.nid} zone {self.zid}, {order_cpu_desc} mt {mt} had unexpected state: {errors}")
-                    if page.get_nid() != self.nid or page.get_zid() != self.zid:
-                        print(f"page 0x{int(page_obj.address):x} pfn {page.pfn} misplaced on "
-                              f"{error_desc} of node {self.nid} zone {self.zid}, {order_cpu_desc} mt {mt} "
-                              f"has flags for node {page.get_nid()} zone {page.get_zid()}")
-            except CorruptListError as e:
-                print(f"Error traversing {error_desc} 0x{int(area.address):x} for {order_cpu_desc} mt {mt}: {e}")
-            except BufferError as e:
-                print(f"Error traversing {error_desc} 0x{int(area.address):x} for {order_cpu_desc} mt {mt}: {e}")
+                        if is_pcp:
+                            errors = self._check_pcplist_page(page)
+                        else:
+                            errors = self._check_freelist_page(page, order_cpu)
+                        
+                        if errors != "":
+                            print(f"page 0x{int(page_obj.address):x} pfn {page.pfn} on {error_desc} of node "
+                                  f"{self.nid} zone {self.zid}, {order_cpu_desc} mt {mt} had unexpected state: {errors}")
+                        if page.get_nid() != self.nid or page.get_zid() != self.zid:
+                            print(f"page 0x{int(page_obj.address):x} pfn {page.pfn} misplaced on "
+                                  f"{error_desc} of node {self.nid} zone {self.zid}, {order_cpu_desc} mt {mt} "
+                                  f"has flags for node {page.get_nid()} zone {page.get_zid()}")
+                except CorruptListError as e:
+                    print(f"Error traversing {error_desc} 0x{int(area.address):x} for {order_cpu_desc} mt {mt}: {e}")
+                    continue
+                except BufferError as e:
+                    print(f"Error traversing {error_desc} 0x{int(area.address):x} for {order_cpu_desc} mt {mt}: {e}")
+                    continue
+                break
         nr_expected = area["count"] if is_pcp else area["nr_free"]
         if nr_free != nr_expected:
             print(f"nr_free mismatch in {error_desc} 0x{int(area.address):x} for {order_cpu_desc}: "

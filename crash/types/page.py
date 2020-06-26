@@ -80,6 +80,7 @@ class Page:
 
     _is_tail: Callable[['Page'], bool]
     _compound_head: Callable[['Page'], int]
+    count_field = None
 
     @classmethod
     def setup_page_type(cls, gdbtype: gdb.Type) -> None:
@@ -260,6 +261,9 @@ class Page:
         return (mapping & PAGE_MAPPING_ANON) != 0
 
     def is_buddy(self) -> bool:
+        return self.page_mapcount() == -128
+    
+    def _is_buddy(self) -> bool:
         page_type = int(self.gdb_obj["page_type"])
         
         base = 0xf0000000
@@ -285,10 +289,6 @@ class Page:
         zid = self.flags >> shift & ((1 << self.ZONES_WIDTH) - 1)
         return zid
 
-    def get_count(self) -> int:
-        head = self.compound_head()
-        return int(head.gdb_obj["_refcount"]["counter"])
-
     def __compound_head_first_page(self) -> int:
         return int(self.gdb_obj['first_page'])
 
@@ -311,7 +311,7 @@ class Page:
 		
     def page_count(self) -> int:
         head = self.compound_head()
-        return int(head.gdb_obj["_refcount"]["counter"])
+        return int(head.gdb_obj["_count"]["counter"])
 
     def page_mapcount(self) -> int:
         return int(self.gdb_obj["_mapcount"]["counter"])
