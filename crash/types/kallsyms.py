@@ -5,18 +5,27 @@ import crash
 
 import gdb
 
-from crash.util import get_minsymbol_value, get_minsymbol_pointer
-from crash.util.symbols import Types
+from crash.util import get_minsymbol_value, get_minsymbol_pointer, \
+                       get_minsymbol_addr, get_typed_pointer
+from crash.util.symbols import Types, Symvals
+from crash.types.module import for_each_module
 from crash.cache.syscache import config_enabled
 
 #symbols = Symbols(['kallsyms_num_syms', 'kallsyms_addresses'])
-types = Types(['unsigned long', 'unsigned int', 'int', 'u8', 'u16'])
+symvals = Symvals(['mod_tree'])
+types = Types(['unsigned long', 'unsigned int', 'int', 'u8', 'u16', 'char *'])
 
 class Kallsyms:
 
     _config_setup_done = False
     _CONFIG_KALLSYMS_BASE_RELATIVE = None
     _CONFIG_KALLSYMS_ABSOLUTE_PERCPU = None
+
+    _stext_addr = None
+    _end_addr = None
+   
+    module_addr_min = None
+    module_addr_max = None 
 
     kallsyms_num_syms = None
     kallsyms_relative_base = None
@@ -42,11 +51,17 @@ class Kallsyms:
         cls.kallsyms_names = get_minsymbol_pointer("kallsyms_names",
                                                    types.u8_type)
         cls.kallsyms_markers = get_minsymbol_pointer("kallsyms_markers",
-                                                     types.unsigned_int_type) 
+                                                     types.unsigned_long_type)
         cls.kallsyms_token_table = get_minsymbol_pointer("kallsyms_token_table",
                                                          types.u8_type)
         cls.kallsyms_token_index = get_minsymbol_pointer("kallsyms_token_index",
                                                          types.u16_type)
+
+        cls._stext_addr = get_minsymbol_addr("_stext")
+        cls._end_addr = get_minsymbol_addr("_end")
+
+        cls.module_addr_min = int(symvals.mod_tree["addr_min"])
+        cls.module_addr_max = int(symvals.mod_tree["addr_max"])
 
         if cls._CONFIG_KALLSYMS_BASE_RELATIVE:
             cls.kallsyms_relative_base = int(get_minsymbol_value("kallsyms_relative_base",
@@ -65,11 +80,16 @@ class Kallsyms:
             raise NotImplementedError("kallsyms support for !CONFIG_KALLSYMS_ABSOLUTE_PERCPU")
 
         offset = int(cls.kallsyms_offsets[idx])
+        #print(f"idx {idx} kallsyms_offsets {int(cls.kallsyms_offsets):x}")
         
         if offset >= 0:
+            #print("offset is positive")
             return offset
+
+        ret = cls.kallsyms_relative_base - 1 - offset
+        #print(f"offset {offset} is negative, base {cls.kallsyms_relative_base:x} addr {ret:x}")
     
-        return cls.kallsyms_relative_base - 1 - offset
+        return ret
 
     @classmethod
     def _get_symbol_pos(cls, addr: int) -> (int, int, int):
@@ -135,11 +155,83 @@ class Kallsyms:
 
         return out
 
+    @classmethod
+    def _symname(cls, kallsyms, symnum):
+        offset = int(kallsyms["symtab"][symnum]["st_name"])
+        string_addr = int(kallsyms["strtab"]) + offset
+        string = get_typed_pointer(string_addr, types.char_p_type)
+        return string.string()
+
+    @classmethod
+    def get_ksymbol(cls, mod: gdb.Value, addr: int, nextval: int, modname: str):
+        kallsyms = mod["kallsyms"]
+        best = 0
+
+        for i in range(1, int(kallsyms["num_symtab"])):
+            # XXX SHN_UNDEF is defined as 0
+            if kallsyms["symtab"][i]["st_shndx"] == 0:
+                continue
+            name = cls._symname(kallsyms, i)
+            if name == "":
+                continue
+            # XXX something with is_arm_mapping_symbol
+            
+            st_value = int(kallsyms["symtab"][i]["st_value"])
+            best_st_value = int(kallsyms["symtab"][best]["st_value"])
+
+            if st_value <= addr and st_value > best_st_value:
+                best = i
+            
+            if st_value > addr and st_value < nextval:
+                nextval = st_value
+
+        if best == 0:
+            return f"unknown symbol [{modname}]"
+
+        name = cls._symname(kallsyms, best)
+        st_value = int(kallsyms["symtab"][best]["st_value"])
+        size = nextval - st_value
+        offset = addr - st_value
+
+        return f"{name}+0x{offset:x}/0x{size:x} (+{offset}/{size}) [{modname}]"
+
+    @classmethod
+    def module_address_lookup(cls, addr: int):
+        # XXX simpler than implementing the tree find
+        for mod in for_each_module():
+
+            init_base = int(mod["init_layout"]["base"])
+            init_size = int(mod["init_layout"]["size"])
+            if addr >= init_base and addr < init_base + init_size:
+                name = mod["name"].string()
+                return cls.get_ksymbol(mod, addr, init_base + init_size, f"{name}(init)")
+
+            core_base = int(mod["core_layout"]["base"])
+            core_size = int(mod["core_layout"]["size"])
+            if addr >= core_base and addr < core_base + core_size:
+                name = mod["name"].string()
+                return cls.get_ksymbol(mod, addr, core_base + core_size, name)
+
+        return None
+
 def kallsyms_lookup(addr: int) -> str:
     Kallsyms._config_setup()
 
-    (pos, offset, size) = Kallsyms._get_symbol_pos(addr)
+    if addr >= Kallsyms._stext_addr and addr <= Kallsyms._end_addr:
 
-    sym = Kallsyms._expand_symbol(Kallsyms._get_symbol_offset(pos))
+        (pos, offset, size) = Kallsyms._get_symbol_pos(addr)
 
-    return f"{sym}+0x{offset:x}/0x{size:x} (+{offset}/{size})"
+        sym = Kallsyms._expand_symbol(Kallsyms._get_symbol_offset(pos))
+
+        return f"{sym}+0x{offset:x}/0x{size:x} (+{offset}/{size})"
+
+    if addr >= Kallsyms.module_addr_min and addr <= Kallsyms.module_addr_max:
+
+        mod_ksymbol = Kallsyms.module_address_lookup(addr)
+
+        if mod_ksymbol:
+            return mod_ksymbol
+
+        return "unknown module symbol"    
+
+    return "unknown symbol"

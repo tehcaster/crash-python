@@ -397,6 +397,11 @@ def get_typed_pointer(val: AddressSpecifier, gdbtype: gdb.Type) -> gdb.Value:
 
     return ret
 
+def get_minsymbol_addr(symname: str) -> int:
+    sym = gdb.lookup_minimal_symbol(symname)
+    addr = sym.value().address
+    return int(addr)
+
 def get_minsymbol_pointer(symname: str, gdbtype: gdb.Type) -> gdb.Value:
     sym = gdb.lookup_minimal_symbol(symname)
     addr = sym.value().address

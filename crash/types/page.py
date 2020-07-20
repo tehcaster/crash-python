@@ -22,8 +22,8 @@ PAGE_MAPPING_ANON = 1
 
 types = Types(['unsigned long', 'struct page', 'enum pageflags',
                'enum zone_type', 'struct mem_section', 'enum page_ext_flags',
-               'struct page_owner'])
-symvals = Symvals(['mem_section', 'max_pfn', 'page_ext_size', 'page_owner_ops'])
+               'struct page_owner', 'struct page_ext'])
+symvals = Symvals(['mem_section', 'max_pfn', 'page_ext_size', 'extra_mem', 'page_owner_ops'])
 
 PageType = TypeVar('PageType', bound='Page')
 
@@ -234,6 +234,9 @@ class Page:
         self.address = int(obj.address)
         self.pfn = pfn
         self.flags = int(obj["flags"])
+        self._page_ext = None
+        self._page_ext_addr = None
+        self._page_owner = None
 
     def __is_tail_flagcombo(self) -> bool:
         return bool((self.flags & self.PG_tail) == self.PG_tail)
@@ -311,19 +314,60 @@ class Page:
 		
     def page_count(self) -> int:
         head = self.compound_head()
-        return int(head.gdb_obj["_count"]["counter"])
+        return int(head.gdb_obj["_refcount"]["counter"])
 
     def page_mapcount(self) -> int:
         return int(self.gdb_obj["_mapcount"]["counter"])
 
-    def dump_page_owner(self) -> None:
+    @property
+    def page_ext(self):
+        if self._page_ext is not None:
+            return self._page_ext
+
         section = Page.pfn_to_section(self.pfn)
         base = section["page_ext"]
-        page_ext_size = int(symvals.page_ext_size)
+        try:
+            page_ext_size = int(symvals.page_ext_size)
+        except DelayedAttributeError:
+            page_ext_size = int(symvals.extra_mem) + types.page_ext_type.sizeof
         page_ext_addr = int(base) + self.pfn * page_ext_size
 
         page_ext = get_typed_pointer(page_ext_addr, base.type)
         if int(page_ext) == 0:
+            return None
+
+        self._page_ext_addr = page_ext_addr
+        self._page_ext = page_ext.dereference()        
+        return self._page_ext
+
+    def is_page_ext_debug(self) -> bool:
+        page_ext = self.page_ext
+        if page_ext is None:
+            return False
+
+        ext_flags = int(page_ext["flags"])
+
+        return (ext_flags & (1 << self.page_ext_flags["PAGE_EXT_DEBUG_FRAG"]) != 0)
+
+    @property
+    def page_owner(self):
+        if self._page_owner is not None:
+            return self._page_owner
+
+        page_ext = self.page_ext
+        if page_ext is None:
+            return None
+    
+        page_owner_offset = int(symvals.page_owner_ops["offset"])
+        page_owner = get_typed_pointer(self._page_ext_addr + page_owner_offset, types.page_owner_type)
+
+        self._page_owner = page_owner.dereference()
+        return self._page_owner 
+
+    def dump_page_owner(self):
+        page_ext = self.page_ext
+
+        if page_ext is None:
             return
 
         ext_flags = int(page_ext["flags"])
@@ -332,8 +376,7 @@ class Page:
 
         print(f"page_owner={has_page_owner} page_owner_allocated={page_owner_alloc}")
 
-        page_owner_offset = int(symvals.page_owner_ops["offset"])
-        page_owner = get_typed_pointer(page_ext_addr + page_owner_offset, types.page_owner_type)
+        page_owner = self.page_owner
 
         order = int(page_owner["order"])
 
@@ -353,7 +396,7 @@ class Page:
         free_stack = StackTrace.from_handle(page_owner["free_handle"])
         print("Freeing stack:")
         free_stack.dump("  ")
-        
+
 
     def dump(self) -> None:
         print("dumping page:")
@@ -377,8 +420,6 @@ class Page:
               f"flags=0x{self.flags:x}{flags_str}")
 
         self.dump_page_owner()
-        
-		
 
 type_cbs = TypeCallbacks([('struct page', Page.setup_page_type),
                           ('enum pageflags', Page.setup_pageflags),

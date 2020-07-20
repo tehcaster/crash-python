@@ -812,6 +812,15 @@ class KmemCacheSLAB(KmemCache):
 
             print(f"Node {nid}: nr_slabs={nr_slabs}, nr_objs={nr_objs}, nr_free={nr_free}")
 
+    def get_all_slabs(self):
+        for (_, node) in self._get_nodelists():
+            for slab in self.get_slabs_of_type(node, SlabSLAB.slab_partial):
+                yield slab
+            for slab in self.get_slabs_of_type(node, SlabSLAB.slab_full):
+                yield slab
+            for slab in self.get_slabs_of_type(node, SlabSLAB.slab_free):
+                yield slab
+
     def get_allocated_objects(self) -> Iterable[int]:
         for (_, node) in self._get_nodelists():
             for obj in self.__get_allocated_objects(node, SlabSLAB.slab_partial):
