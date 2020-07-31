@@ -11,7 +11,7 @@ import sys
 import traceback
 
 from crash.util import container_of, find_member_variant,\
-                       safe_find_member_variant
+                       safe_find_member_variant, get_typed_pointer
 from crash.util.symbols import Types, TypeCallbacks, SymbolCallbacks
 from crash.types.percpu import get_percpu_var
 from crash.types.list import list_for_each, list_for_each_entry, ListError
@@ -533,20 +533,39 @@ class SlabSLUB(Slab):
         freelist = page["freelist"]
         nr_free = 0
 
-        while freelist != 0:
+        obj_addr = int(freelist)
+        while obj_addr != 0:
             nr_free += 1
             if nr_free > self.nr_objects:
                 self._pr_err(":too many objects on freelist, aborting traversal")
                 break
 
             #TODO validate the pointers - check_valid_pointer()
-            obj_addr = int(freelist)
             self.free.add(obj_addr)
-            freelist += fp_offset
-            freelist = freelist.cast(types.void_p_type.pointer()).dereference()
             if obj_addr in cpu_freelists:
                 self._pr_err(f": free object 0x{obj_addr:x} found cached in "
                              f"{cpu_freelists[obj_addr]}")
+
+            fp = get_typed_pointer(obj_addr + fp_offset, types.void_p_type.pointer()).dereference()
+            
+            if self.kmem_cache.random is not None:
+
+                fp_addr = int(fp.address)
+#                print(f"fp_addr=0x{fp_addr:x} obj_addr=0x{obj_addr:x}")
+                try:
+                    obj_addr = int(fp)
+                except gdb.NotAvailableError:
+                    self._pr_err(f" freelist traversing error on address 0x{fp_addr:x} (XOR with s->random: 0x{fp_addr ^ self.kmem_cache.random:x}) index {nr_free-1}")
+                    break
+#                print(f"fp=0x{obj_addr:x} random=0x{self.kmem_cache.random:x}")
+                obj_addr = fp_addr ^ obj_addr ^ self.kmem_cache.random
+#                print(f"next object addr is 0x{obj_addr:x}")
+            else:
+                try:
+                    obj_addr = int(fp)
+                except gdb.NotAvailableError:
+                    self._pr_err(f" freelist traversing error on address 0x{int(fp.address):x} index {nr_free-1}")
+                    break
 
         if len(self.free) != self.nr_free:
             self._pr_err(f": nr_free={self.nr_free} but freelist has "
@@ -1108,6 +1127,10 @@ class KmemCacheSLUB(KmemCache):
         self.cpu_freelists: Dict[int, str] = dict()
         self.cpu_freelists_sizes: List[int] = [0 for x in for_each_online_cpu()]
         self.processed = False
+        try:
+            self.random = int(gdb_obj["random"])
+        except gdb.error:
+            self.random = None
 
     def list_all(self, verbosity: int) -> None:
         flags = ProcessingFlags(print_level=verbosity)
@@ -1153,23 +1176,41 @@ class KmemCacheSLUB(KmemCache):
         # unlike page.freelist (void *), kmem_cache_cpu is (void **)
         # this messes with the += fp_offset arithmetic, so recast it
         freelist = freelist.cast(types.void_p_type)
-        while freelist != 0:
+        obj_addr = int(freelist)
+        while obj_addr != 0:
             nr_free += 1
             if nr_free > nr_objects:
                 self._pr_err(f" has too many objects on {cache_type}, aborting traversal")
                 break
 
             #TODO validate the pointers - check_valid_pointer()
-            obj_addr = int(freelist)
             if obj_addr in self.cpu_freelists:
-                self._pr_err(f" per-cpu freelist duplicitydetected: object "
+                self._pr_err(f" per-cpu freelist duplicity detected: object "
                              f"0x{obj_addr:x} is in {cache_type} and also "
                              f"{self.cpu_freelists[obj_addr]}")
             else:
                 self.cpu_freelists[obj_addr] = cache_type
-            freelist += fp_offset
 
-            freelist = freelist.cast(types.void_p_type.pointer()).dereference()
+            fp = get_typed_pointer(obj_addr + fp_offset, types.void_p_type.pointer()).dereference()
+
+            if self.random is not None:
+
+                fp_addr = int(fp.address)
+#                print(f"fp_addr=0x{fp_addr:x} obj_addr=0x{obj_addr:x}")
+                try:
+                    obj_addr = int(fp)
+                except gdb.NotAvailableError:
+                    self._pr_err(f" {cache_type} traversing error on address 0x{fp_addr:x} (XOR with s->random: 0x{fp_addr ^ self.random:x}) index {nr_free-1}")
+                    break
+#                print(f"fp=0x{obj_addr:x} random=0x{self.random:x}")
+                obj_addr = fp_addr ^ obj_addr ^ self.random
+#                print(f"next object addr is 0x{obj_addr:x}")
+            else:
+                try:
+                    obj_addr = int(fp)
+                except gdb.NotAvailableError:
+                    self._pr_err(f" {cache_type} traversing error on address 0x{int(fp.address):x} index {nr_free-1}")
+                    break
 
         return nr_free
 

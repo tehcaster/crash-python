@@ -116,6 +116,11 @@ class Page:
             cls.SECTIONS_PER_ROOT = 1
 
     @classmethod
+    def pfn_to_section_nr(cls, pfn: int) -> gdb.Value:
+        section_nr = pfn >> (cls.SECTION_SIZE_BITS - cls.PAGE_SHIFT)
+        return section_nr
+
+    @classmethod
     def pfn_to_section(cls, pfn: int) -> gdb.Value:
         section_nr = pfn >> (cls.SECTION_SIZE_BITS - cls.PAGE_SHIFT)
         root_idx = section_nr // cls.SECTIONS_PER_ROOT
