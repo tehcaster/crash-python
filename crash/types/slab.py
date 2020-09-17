@@ -372,19 +372,7 @@ class SlabSLAB(Slab):
         array_caches = self.kmem_cache.get_array_caches()
 
         if addr in array_caches:
-            ac = array_caches[addr]
-
-            ac_type = ac['ac_type'] # pylint: disable=unsubscriptable-object
-            nid_tgt = int(ac['nid_tgt']) # pylint: disable=unsubscriptable-object
-            if ac_type == self.AC_PERCPU:
-                ac_desc = f"cpu {nid_tgt} cache"
-            elif ac_type == self.AC_SHARED:
-                ac_desc = f"shared cache on node {nid_tgt}"
-            elif ac_type == self.AC_ALIEN:
-                nid_src = int(ac['nid_src']) # pylint: disable=unsubscriptable-object
-                ac_desc = f"alien cache on node {nid_src} for node {nid_tgt}"
-            else:
-                ac_desc = "unknown cache"
+            ac_desc = array_caches[addr]
 
             return (False, ac_desc)
 
@@ -463,8 +451,7 @@ class SlabSLAB(Slab):
         last_page_addr = 0
         for obj in self.get_objects():
             if obj in self.free and obj in ac:
-                self._pr_err(f": obj 0x{obj:x} is marked as free but in array cache:")
-                print(ac[obj])
+                self._pr_err(f": obj 0x{obj:x} is marked as free but in array cache: {ac[obj]}")
             try:
                 page = page_from_addr(obj).compound_head()
             except gdb.NotAvailableError:
@@ -715,8 +702,11 @@ class KmemCache(ABC):
         self.gdb_obj = gdb_obj
         self.address = int(gdb_obj.address)
 
-        self.size = int(gdb_obj["size"])
-        self.object_size = int(gdb_obj["object_size"])
+        self.size = int(gdb_obj[self.buffer_size_name])
+        try:
+            self.object_size = int(gdb_obj["object_size"])
+        except gdb.error:
+            self.object_size = -1
         self.flags = int(gdb_obj["flags"])
 
         self.objs_per_slab = 0
@@ -827,9 +817,10 @@ class KmemCacheSLAB(KmemCache):
             if free_declared != free_counted:
                 self._pr_err(f": free objects mismatch on node {nid}: "
                              f"declared={free_declared} counted={free_counted}")
-            self.check_array_caches()
 
             print(f"Node {nid}: nr_slabs={nr_slabs}, nr_objs={nr_objs}, nr_free={nr_free}")
+
+        self.check_array_caches()
 
     def get_all_slabs(self):
         for (_, node) in self._get_nodelists():
@@ -854,10 +845,17 @@ class KmemCacheSLAB(KmemCache):
         # TODO check avail > limit
         if avail == 0:
             return
+            
+        if ac_type == SlabSLAB.AC_PERCPU:
+            ac_desc = f"percpu {nid_tgt}"
+        elif ac_type == SlabSLAB.AC_SHARED:
+            ac_desc = f"shared node {nid_tgt}"
+        elif ac_type == SlabSLAB.AC_ALIEN:
+            ac_desc = f"alien cache on node {nid_src} for node {nid_tgt}"
+        else:
+            ac_desc = "unknown cache"
 
-        cache_dict = {"ac_type" : ac_type,
-                      "nid_src" : nid_src,
-                      "nid_tgt" : nid_tgt}
+        ac_desc += f" addr 0x{int(acache.address):x}"
 
         if ac_type == SlabSLAB.AC_PERCPU:
             nid_tgt = numa_node_id(nid_tgt)
@@ -865,16 +863,16 @@ class KmemCacheSLAB(KmemCache):
         for i in range(avail):
             ptr = int(acache["entry"][i])
             if ptr in self.array_caches:
-                self._pr_err(f": object 0x{ptr:x} is in cache {cache_dict} "
-                             f"but also {self.array_caches[ptr]}")
+                self._pr_err(f": object 0x{ptr:x} is in array cache '{ac_desc}'"
+                             f"but also '{self.array_caches[ptr]}'")
             else:
-                self.array_caches[ptr] = cache_dict
+                self.array_caches[ptr] = f"{ac_desc} index {i}"
 
             page = page_from_addr(ptr)
             obj_nid = page.get_nid()
 
             if obj_nid != nid_tgt:
-                self._pr_err(f": object 0x{ptr:x} in cache {cache_dict} is "
+                self._pr_err(f": object 0x{ptr:x} in cache '{ac_desc}' is "
                              f"on wrong nid {obj_nid} instead of {nid_tgt}")
 
     def __fill_alien_caches(self, node: gdb.Value, nid_src: int) -> None:
@@ -1071,20 +1069,25 @@ class KmemCacheSLAB(KmemCache):
         for ac_ptr in acs:
             ac_obj_slab = slab_from_obj_addr(ac_ptr)
             if not ac_obj_slab:
-                self._pr_err(f": cached pointer 0x{ac_ptr:x} in 0x{acs[ac_ptr]:x} "
+                self._pr_err(f": cached pointer 0x{ac_ptr:x} in {acs[ac_ptr]} "
                              f"not found in any slab")
             elif ac_obj_slab.kmem_cache.address != self.address:
-                self._pr_err(f": cached pointer 0x{ac_ptr:x} in 0x{acs[ac_ptr]:x} "
+                self._pr_err(f": cached pointer 0x{ac_ptr:x} in {acs[ac_ptr]} "
                              f"belongs to wrong kmem cache {ac_obj_slab.kmem_cache.name}")
             else:
                 ac_obj_obj = ac_obj_slab.contains_obj(ac_ptr)
-                if ac_obj_obj[0] is False and ac_obj_obj[2] is None:
-                    self._pr_err(f": cached pointer 0x{ac_ptr:x} in 0x{acs[ac_ptr]:x} "
-                                 f"is not allocated: {ac_obj_obj}")
-                elif ac_obj_obj[1] != ac_ptr:
-                    self._pr_err(f": cached pointer 0x{ac_ptr:x} in 0x{acs[ac_ptr]:x} "
-                                 f"has wrong offset: ({ac_obj_obj[0]}, 0x{ac_obj_obj[1]:x}, "
-                                 f"{ac_obj_obj[2]})")
+                if ac_obj_obj[0] is False:
+                    self._pr_err(f": cached pointer 0x{ac_ptr:x} in {acs[ac_ptr]} "
+                                 f"is not valid in slab: {ac_obj_obj[2]})")
+                else:
+                    ac_obj_slab.populate_free()
+                    if ac_ptr in ac_obj_slab.free:
+                        self._pr_err(f": cached pointer 0x{ac_ptr:x} in {acs[ac_ptr]} "
+                                     f"is marked as free in slab")
+                    if ac_obj_obj[1] != ac_ptr:
+                        self._pr_err(f": cached pointer 0x{ac_ptr:x} in {acs[ac_ptr]} "
+                                     f"has wrong offset: ({ac_obj_obj[0]}, 0x{ac_obj_obj[1]:x}, "
+                                     f"{ac_obj_obj[2]})")
 
 class KmemCacheSLUB(KmemCache):
 
