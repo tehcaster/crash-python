@@ -718,6 +718,7 @@ class KmemCache(ABC):
         cls.percpu_name = find_member_variant(gdbtype, ['cpu_cache', 'cpu_slab', 'array'])
         if cls.percpu_name == 'cpu_slab':
             cls.SLUB = True
+            cls.buffer_size_name = 'size'
         else:
             cls.buffer_size_name = find_member_variant(gdbtype, ['buffer_size', 'size'])
             cls.percpu_cache = bool(cls.percpu_name == 'cpu_cache')
